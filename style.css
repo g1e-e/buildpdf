@@ -1,0 +1,49 @@
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#eef1f6;color:#1d2430;height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:16px;flex-wrap:wrap;padding:10px 18px;background:#1f3b63;color:#fff}
+header h1{margin:0;font-size:20px}
+.privacy{font-size:13px;opacity:.9}
+.actions{margin-left:auto;display:flex;gap:8px;flex-wrap:wrap}
+button{font:inherit;font-size:13px;padding:6px 12px;border-radius:6px;border:1px solid #c6cdd8;background:#fff;color:#1d2430;cursor:pointer}
+button:hover{background:#f2f4f8}
+button.primary{background:#2f6fde;border-color:#2f6fde;color:#fff}
+button.primary:hover{background:#255bb8}
+button.danger{color:#b42318}
+button.icon{padding:2px 7px;font-size:12px}
+.drop{margin:14px 18px 0;padding:18px;border:2px dashed #9aa8bd;border-radius:10px;text-align:center;background:#fff}
+.drop.over{border-color:#2f6fde;background:#eaf1ff}
+.drop p{margin:6px 0}
+.drop.compact{padding:8px}
+.drop.compact .muted{display:none}
+.muted{color:#6b7587;font-size:13px}
+.status{margin:10px 18px 0;padding:8px 12px;background:#fff8e1;border:1px solid #f1d48a;border-radius:6px;font-size:13px;white-space:pre-wrap}
+main{flex:1;display:flex;gap:14px;overflow-x:auto;padding:14px 18px;align-items:flex-start}
+.col{flex:0 0 300px;max-height:100%;display:flex;flex-direction:column;background:#dfe4ec;border-radius:10px;padding:8px}
+.col.output{background:#d6e4fa}
+.col-head{display:flex;align-items:center;gap:6px;padding:2px 2px 6px}
+.col-head .tag{font-size:10px;text-transform:uppercase;letter-spacing:.05em;background:#fff;border-radius:4px;padding:1px 5px;color:#55607a}
+.col-title{flex:1;font-weight:600;font-size:14px;border:1px solid transparent;background:transparent;padding:3px 4px;border-radius:4px;min-width:0}
+.col-title:focus,.col-title:hover{border-color:#9aa8bd;background:#fff}
+.col-meta{font-size:12px;color:#55607a;padding:0 4px 6px}
+.cards{flex:1;overflow-y:auto;min-height:50px;display:flex;flex-direction:column;gap:7px;padding:2px}
+.cards:empty::after{content:"Drag cards here";color:#7d879a;font-size:12px;text-align:center;padding:14px;border:1px dashed #9aa8bd;border-radius:6px}
+.col-foot{display:flex;gap:6px;padding-top:8px}
+.col-foot button{flex:1}
+.card{background:#fff;border-radius:7px;box-shadow:0 1px 2px rgba(0,0,0,.15);padding:7px 8px}
+.card.missing{opacity:.6}
+.card-row{display:flex;align-items:center;gap:6px}
+.handle{cursor:grab;color:#7d879a;font-size:16px;user-select:none;padding:0 2px}
+.card-name{flex:1;font-size:13px;font-weight:600;word-break:break-word;cursor:pointer}
+.count{font-size:11px;color:#55607a;white-space:nowrap}
+.card-tools{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;align-items:center}
+.card-tools select,.file select{font-size:12px;max-width:130px;padding:2px}
+.files{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:3px;min-height:20px}
+.file{display:flex;align-items:center;gap:4px;font-size:12px;background:#f4f6fa;border-radius:4px;padding:3px 5px}
+.file .fname{flex:1;word-break:break-all}
+.file.missing .fname{color:#b42318;text-decoration:line-through}
+.sortable-ghost{opacity:.35}
+.sortable-chosen{box-shadow:0 4px 12px rgba(0,0,0,.25)}
+.overlay{position:fixed;inset:0;background:rgba(15,25,40,.45);display:flex;align-items:center;justify-content:center;z-index:10}
+.overlay[hidden],.status[hidden],.drop[hidden]{display:none}
+.overlay-box{background:#fff;border-radius:10px;padding:20px 26px;min-width:320px;text-align:center}
+.overlay-box progress{width:100%}

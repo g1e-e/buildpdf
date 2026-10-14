@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>buildpdf</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>buildpdf</h1>
+  <span class="privacy">🔒 Your files never leave this computer. Everything runs in your browser.</span>
+  <div class="actions">
+    <button id="addFolders">Add folders</button>
+    <button id="addList">+ Add list</button>
+    <button id="buildAll" class="primary">Build all</button>
+    <button id="clearBoard" class="danger">Clear board</button>
+  </div>
+</header>
+<input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+<div id="drop" class="drop">
+  <p><strong>Drop folders here</strong> or</p>
+  <button id="chooseFolders" class="primary">Choose folders</button>
+  <p class="muted">Each top-level folder becomes a column. Each folder inside it becomes a card.</p>
+</div>
+<div id="status" class="status" hidden></div>
+<main id="board"></main>
+<div id="overlay" class="overlay" hidden><div class="overlay-box"><p id="overlayText">Building…</p><progress id="overlayBar" max="1" value="0"></progress></div></div>
+<script src="lib/pdf-lib.min.js"></script>
+<script src="lib/Sortable.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
