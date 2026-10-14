@@ -277,6 +277,9 @@
   let pdfjsP = null;
   const pdfjs = () => pdfjsP || (pdfjsP = import('./lib/pdf.min.mjs').then(m => { m.GlobalWorkerOptions.workerSrc = new URL('lib/pdf.worker.min.mjs', location.href).href; return m; }));
   let picker = null;
+  const SIZES = { S: 200, M: 300, L: 400 };
+  const SKEY = 'buildpdf.thumbSize';
+  const thumbSize = () => { const v = localStorage.getItem(SKEY); return SIZES[v] ? v : 'L'; };
 
   function closePicker() {
     if (!picker) return;
@@ -297,6 +300,7 @@
       el('div', { class: 'pk-box', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose pages' },
         el('div', { class: 'pk-head' },
           el('strong', { class: 'pk-title' }, baseName(p)), counter,
+          el('div', { class: 'pk-size', role: 'group', 'aria-label': 'Thumbnail size' }, Object.keys(SIZES).map(z => el('button', { class: 'pk-sz' + (z === thumbSize() ? ' on' : ''), 'data-size': z, title: 'Thumbnail size ' + z, onclick: () => setSize(z) }, z))),
           el('button', { onclick: () => setAll(true) }, 'Select all'),
           el('button', { onclick: () => setAll(false) }, 'Deselect all'),
           el('button', { class: 'primary', onclick: closePicker }, 'Done'),
@@ -304,6 +308,15 @@
         el('p', { class: 'muted pk-hint' }, 'Click a page to include or leave it out. Shift-click to toggle a range.'),
         grid));
     document.body.append(root);
+    const applySize = () => root.style.setProperty('--tw', SIZES[thumbSize()] + 'px');
+    applySize();
+    function setSize(z) {
+      if (z === thumbSize()) return;
+      localStorage.setItem(SKEY, z); applySize();
+      root.querySelectorAll('.pk-sz').forEach(b => b.classList.toggle('on', b.dataset.size === z));
+      if (!me.doc) return;
+      me.thumbs.forEach(t => { t.querySelector('.pk-img').textContent = ''; me.obs.unobserve(t); me.obs.observe(t); });
+    }
     const me = picker = { root, obs: new IntersectionObserver(onSeen, { root: grid, rootMargin: '300px' }), doc: null, sel: null, n: 0, last: null, thumbs: [] };
     function paint() {
       me.thumbs.forEach((t, i) => { const on = me.sel.has(i); t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); });
@@ -326,11 +339,13 @@
           const page = await me.doc.getPage(+t.dataset.i + 1);
           if (picker !== me) return;
           const v1 = page.getViewport({ scale: 1 });
-          const vp = page.getViewport({ scale: 160 / v1.width * (window.devicePixelRatio || 1) });
+          const w = SIZES[thumbSize()];
+          const vp = page.getViewport({ scale: w / v1.width * (window.devicePixelRatio || 1) });
           const cv = document.createElement('canvas');
           cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
           await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
           if (picker !== me) return;
+          if (w !== SIZES[thumbSize()]) { page.cleanup(); continue; }
           const img = t.querySelector('.pk-img'); img.textContent = ''; img.append(cv);
           page.cleanup();
         } catch (e) { t.querySelector('.pk-img').textContent = 'Preview unavailable'; }
