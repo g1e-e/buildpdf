@@ -172,11 +172,7 @@
       el('span', { class: 'handle card-handle', title: 'Drag to move' }, '⠿'),
       el('span', { class: 'card-name', onclick: () => toggle(k.id), title: 'Show files' }, (open ? '▾ ' : '▸ ') + k.name),
       el('span', { class: 'count', 'data-kcount': k.id }));
-    const tools = el('div', { class: 'card-tools' },
-      el('button', { class: 'icon', title: 'Move up', onclick: () => moveCard(k.id, -1) }, '↑'),
-      el('button', { class: 'icon', title: 'Move down', onclick: () => moveCard(k.id, 1) }, '↓'),
-      moveSelect('Move to…', c.id, to => { const f = findCard(k.id); f.col.cards.splice(f.i, 1); to.cards.push(k); save(); render(); }));
-    const card = el('div', { class: 'card' + (missing ? ' missing' : ''), 'data-card': k.id }, row, tools);
+    const card = el('div', { class: 'card' + (missing ? ' missing' : ''), 'data-card': k.id }, row);
     if (open) {
       const ul = el('ul', { class: 'files', 'data-card': k.id });
       for (const p of k.files) {
@@ -184,8 +180,6 @@
           el('span', { class: 'handle file-handle', title: 'Drag to reorder or move to another card' }, '⠿'),
           el('span', { class: 'fname' }, baseName(p)),
           el('span', { class: 'count', 'data-fpages': p }, fileLabel(p)),
-          el('button', { class: 'icon', title: 'Move up', onclick: () => moveFile(k, p, -1) }, '↑'),
-          el('button', { class: 'icon', title: 'Move down', onclick: () => moveFile(k, p, 1) }, '↓'),
           moveSelect('Own card in…', null, to => splitFile(k, p, to))));
       }
       card.append(ul);
