@@ -1,7 +1,7 @@
 (() => {
   const KEY = 'buildpdf.board.v1';
   const files = new Map();
-  let board = { cols: [] };
+  let board = { cols: [], sel: {} };
   let uid = 0;
   const id = p => p + Date.now().toString(36) + (uid++).toString(36);
   const $ = s => document.querySelector(s);
@@ -11,13 +11,13 @@
     return { cols: [
       { id: id('c'), type: 'output', title: 'General Credentialing Documents', cards: [] },
       { id: id('c'), type: 'output', title: 'Health and Physical', cards: [] }
-    ] };
+    ], sel: {} };
   }
 
   function load() {
     try {
       const b = JSON.parse(localStorage.getItem(KEY));
-      if (b && Array.isArray(b.cols)) { board = b; return; }
+      if (b && Array.isArray(b.cols)) { board = b; if (!board.sel || typeof board.sel !== 'object') board.sel = {}; return; }
     } catch (e) {}
     board = defaultBoard();
   }
@@ -26,7 +26,7 @@
     localStorage.setItem(KEY, JSON.stringify({ cols: board.cols.map(c => ({
       id: c.id, type: c.type, title: c.title,
       cards: c.cards.map(k => ({ id: k.id, name: k.name, files: k.files.slice() }))
-    })) }));
+    })), sel: board.sel }));
   }
 
   const isPdf = n => /\.pdf$/i.test(n);
@@ -97,9 +97,20 @@
     counting = false;
   }
 
+  const selOf = (p, n) => {
+    const s = board.sel[p];
+    const all = [...Array(n).keys()];
+    if (!Array.isArray(s)) return all;
+    return all.filter(i => s.includes(i));
+  };
+  const setSel = (p, n, arr) => {
+    const a = [...new Set(arr)].filter(i => i >= 0 && i < n).sort((x, y) => x - y);
+    if (a.length === n) delete board.sel[p]; else board.sel[p] = a;
+    save();
+  };
   const pagesOf = list => {
     let n = 0, unknown = false;
-    for (const p of list) { const f = files.get(p); if (!f || f.pages === null) unknown = true; else if (f.pages > 0) n += f.pages; }
+    for (const p of list) { const f = files.get(p); if (!f || f.pages === null) unknown = true; else if (f.pages > 0) n += selOf(p, f.pages).length; }
     return { n, unknown };
   };
   const fmtPages = list => { const r = pagesOf(list); return r.n + (r.unknown ? '+' : '') + ' pg'; };
@@ -108,11 +119,13 @@
     if (!f) return 'missing';
     if (f.pages === null) return '…';
     if (f.pages < 0) return 'unreadable';
-    return f.pages + ' pg';
+    const k = selOf(p, f.pages).length;
+    return k === f.pages ? f.pages + ' pg' : k + '/' + f.pages + ' pages';
   };
+  const noneSel = p => { const f = files.get(p); return !!(f && f.pages > 0 && !selOf(p, f.pages).length); };
 
   function updateCounts() {
-    document.querySelectorAll('[data-fpages]').forEach(e => e.textContent = fileLabel(e.dataset.fpages));
+    document.querySelectorAll('[data-fpages]').forEach(e => { e.textContent = fileLabel(e.dataset.fpages); const li = e.closest('.file'); if (li) li.classList.toggle('nosel', noneSel(e.dataset.fpages)); });
     board.cols.forEach(c => {
       c.cards.forEach(k => { const e = document.querySelector(`[data-kcount="${k.id}"]`); if (e) e.textContent = k.files.length + ' PDF' + (k.files.length === 1 ? '' : 's') + ' · ' + fmtPages(k.files); });
       const e = document.querySelector(`[data-ccount="${c.id}"]`);
@@ -176,9 +189,9 @@
     if (open) {
       const ul = el('ul', { class: 'files', 'data-card': k.id });
       for (const p of k.files) {
-        ul.append(el('li', { class: 'file' + (files.has(p) ? '' : ' missing'), 'data-path': p, title: p },
+        ul.append(el('li', { class: 'file' + (files.has(p) ? '' : ' missing') + (noneSel(p) ? ' nosel' : ''), 'data-path': p, title: p },
           el('span', { class: 'handle file-handle', title: 'Drag to reorder or move to another card' }, '⠿'),
-          el('span', { class: 'fname' }, baseName(p)),
+          el('span', { class: 'fname', title: 'Choose pages', onclick: () => openPicker(p) }, baseName(p)),
           el('span', { class: 'count', 'data-fpages': p }, fileLabel(p)),
           moveSelect('Own card in…', null, to => splitFile(k, p, to))));
       }
@@ -254,9 +267,11 @@
           if (!f) { problems.push(baseName(paths[i]) + ' (not loaded)'); continue; }
           try {
             const src = await PDFLib.PDFDocument.load(await f.file.arrayBuffer(), { ignoreEncryption: true });
-            const pages = await out.copyPages(src, src.getPageIndices());
-            pages.forEach(pg => out.addPage(pg));
             f.pages = src.getPageCount();
+            const idx = selOf(paths[i], f.pages);
+            if (!idx.length) continue;
+            const pages = await out.copyPages(src, idx);
+            pages.forEach(pg => out.addPage(pg));
           } catch (e) { problems.push(baseName(paths[i]) + ' (could not be read)'); }
           await new Promise(r => setTimeout(r));
         }
@@ -272,6 +287,89 @@
     } finally { ov.hidden = true; updateCounts(); }
     status(report.join('\n'));
   }
+
+  let pdfjsP = null;
+  const pdfjs = () => pdfjsP || (pdfjsP = import('./lib/pdf.min.mjs').then(m => { m.GlobalWorkerOptions.workerSrc = new URL('lib/pdf.worker.min.mjs', location.href).href; return m; }));
+  let picker = null;
+
+  function closePicker() {
+    if (!picker) return;
+    picker.obs.disconnect();
+    if (picker.doc) picker.doc.destroy();
+    picker.root.remove();
+    picker = null;
+    updateCounts();
+  }
+
+  async function openPicker(p) {
+    const f = files.get(p);
+    if (!f) { status(baseName(p) + ' is not loaded. Add its folder again first.'); return; }
+    closePicker();
+    const grid = el('div', { class: 'pk-grid' }, el('p', { class: 'muted' }, 'Loading pages…'));
+    const counter = el('span', { class: 'pk-count' });
+    const root = el('div', { class: 'overlay pk', onclick: e => { if (e.target === root) closePicker(); } },
+      el('div', { class: 'pk-box', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose pages' },
+        el('div', { class: 'pk-head' },
+          el('strong', { class: 'pk-title' }, baseName(p)), counter,
+          el('button', { onclick: () => setAll(true) }, 'Select all'),
+          el('button', { onclick: () => setAll(false) }, 'Deselect all'),
+          el('button', { class: 'primary', onclick: closePicker }, 'Done'),
+          el('button', { class: 'icon', title: 'Close', onclick: closePicker }, '✕')),
+        el('p', { class: 'muted pk-hint' }, 'Click a page to include or leave it out. Shift-click to toggle a range.'),
+        grid));
+    document.body.append(root);
+    const me = picker = { root, obs: new IntersectionObserver(onSeen, { root: grid, rootMargin: '300px' }), doc: null, sel: null, n: 0, last: null, thumbs: [] };
+    function paint() {
+      me.thumbs.forEach((t, i) => { const on = me.sel.has(i); t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); });
+      counter.textContent = me.sel.size + ' of ' + me.n + ' pages selected';
+      setSel(p, me.n, [...me.sel]);
+    }
+    function setAll(on) { if (!me.sel) return; me.sel = new Set(on ? [...Array(me.n).keys()] : []); paint(); }
+    function click(i, e) {
+      if (e.shiftKey && me.last !== null) {
+        const on = !me.sel.has(i);
+        for (let j = Math.min(me.last, i); j <= Math.max(me.last, i); j++) on ? me.sel.add(j) : me.sel.delete(j);
+      } else me.sel.has(i) ? me.sel.delete(i) : me.sel.add(i);
+      me.last = i; paint();
+    }
+    async function onSeen(entries) {
+      for (const en of entries) {
+        if (!en.isIntersecting) continue;
+        const t = en.target; me.obs.unobserve(t);
+        try {
+          const page = await me.doc.getPage(+t.dataset.i + 1);
+          if (picker !== me) return;
+          const v1 = page.getViewport({ scale: 1 });
+          const vp = page.getViewport({ scale: 160 / v1.width * (window.devicePixelRatio || 1) });
+          const cv = document.createElement('canvas');
+          cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
+          await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
+          if (picker !== me) return;
+          const img = t.querySelector('.pk-img'); img.textContent = ''; img.append(cv);
+          page.cleanup();
+        } catch (e) { t.querySelector('.pk-img').textContent = 'Preview unavailable'; }
+      }
+    }
+    try {
+      const lib = await pdfjs();
+      const data = new Uint8Array(await f.file.arrayBuffer());
+      const doc = await lib.getDocument({ data, isEvalSupported: false, disableFontFace: false, useSystemFonts: true }).promise;
+      if (picker !== me) { doc.destroy(); return; }
+      me.doc = doc; me.n = doc.numPages; f.pages = me.n;
+      me.sel = new Set(selOf(p, me.n));
+      grid.textContent = '';
+      for (let i = 0; i < me.n; i++) {
+        const t = el('button', { class: 'pk-thumb', 'data-i': i, title: 'Page ' + (i + 1), onclick: e => click(i, e) },
+          el('div', { class: 'pk-img' }), el('span', { class: 'pk-check' }, '✓'), el('span', { class: 'pk-num' }, 'Page ' + (i + 1)));
+        me.thumbs.push(t); grid.append(t); me.obs.observe(t);
+      }
+      paint();
+    } catch (e) {
+      grid.textContent = 'This PDF could not be opened for previews.';
+    }
+  }
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && picker) closePicker(); });
+  document.addEventListener('mousedown', e => { if (e.shiftKey && e.target.closest && e.target.closest('.pk-thumb')) e.preventDefault(); });
 
   async function readDropped(items) {
     const out = [];
