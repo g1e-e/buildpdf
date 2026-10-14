@@ -148,13 +148,6 @@
     return e;
   }
 
-  function moveSelect(label, excludeId, onPick) {
-    const s = el('select', { 'aria-label': label, title: label }, el('option', { value: '' }, label));
-    board.cols.forEach(c => { if (c.id !== excludeId) s.append(el('option', { value: c.id }, c.title || '(untitled)')); });
-    s.addEventListener('change', () => s.value && onPick(board.cols.find(c => c.id === s.value)));
-    return s;
-  }
-
   function render() {
     $('#drop').classList.toggle('compact', files.size > 0);
     boardEl.textContent = '';
@@ -192,8 +185,7 @@
         ul.append(el('li', { class: 'file' + (files.has(p) ? '' : ' missing') + (noneSel(p) ? ' nosel' : ''), 'data-path': p, title: p },
           el('span', { class: 'handle file-handle', title: 'Drag to reorder or move to another card' }, '⠿'),
           el('span', { class: 'fname', title: 'Choose pages', onclick: () => openPicker(p) }, baseName(p)),
-          el('span', { class: 'count', 'data-fpages': p }, fileLabel(p)),
-          moveSelect('Own card in…', null, to => splitFile(k, p, to))));
+          el('span', { class: 'count', 'data-fpages': p }, fileLabel(p))));
       }
       card.append(ul);
     }
@@ -228,12 +220,6 @@
     const i = k.files.indexOf(p), j = i + d;
     if (j < 0 || j >= k.files.length) return;
     [k.files[i], k.files[j]] = [k.files[j], k.files[i]];
-    save(); render();
-  }
-  function splitFile(k, p, to) {
-    k.files.splice(k.files.indexOf(p), 1);
-    to.cards.push({ id: id('k'), name: baseName(p).replace(/\.pdf$/i, ''), files: [p] });
-    board.cols.forEach(c => c.cards = c.cards.filter(x => x.files.length));
     save(); render();
   }
   function moveCol(c, d) {

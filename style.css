@@ -36,7 +36,7 @@ main{flex:1;display:flex;gap:14px;overflow-x:auto;padding:14px 18px;align-items:
 .card-name{flex:1;font-size:13px;font-weight:600;word-break:break-word;cursor:pointer}
 .count{font-size:11px;color:#55607a;white-space:nowrap}
 .card-tools{display:flex;gap:4px;margin-top:6px;flex-wrap:wrap;align-items:center}
-.card-tools select,.file select{font-size:12px;max-width:130px;padding:2px}
+.card-tools select{font-size:12px;max-width:130px;padding:2px}
 .files{list-style:none;margin:6px 0 0;padding:0;display:flex;flex-direction:column;gap:3px;min-height:20px}
 .file{display:flex;align-items:center;gap:4px;font-size:12px;background:#f4f6fa;border-radius:4px;padding:3px 5px}
 .file .fname{flex:1;word-break:break-all}
