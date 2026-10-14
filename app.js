@@ -8,10 +8,7 @@
   const boardEl = $('#board');
 
   function defaultBoard() {
-    return { cols: [
-      { id: id('c'), type: 'output', title: 'General Credentialing Documents', cards: [] },
-      { id: id('c'), type: 'output', title: 'Health and Physical', cards: [] }
-    ], sel: {} };
+    return { cols: [], sel: {} };
   }
 
   function load() {
