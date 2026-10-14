@@ -67,3 +67,9 @@ main{flex:1;display:flex;gap:14px;overflow-x:auto;padding:14px 18px;align-items:
 .pk-thumb.on .pk-check{display:flex}
 .pk-thumb:not(.on) .pk-img{opacity:.35;filter:grayscale(1)}
 .pk-thumb:not(.on) .pk-num{color:#9aa8bd;text-decoration:line-through}
+.formats{display:flex;align-items:center;gap:6px;flex-wrap:wrap;background:rgba(255,255,255,.1);padding:4px 8px;border-radius:8px}
+.fmt-label{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;opacity:.85}
+.formats select{font:inherit;font-size:13px;padding:5px;border-radius:6px;max-width:180px}
+.status{display:flex;gap:10px;align-items:flex-start}
+.status #statusText{flex:1}
+.status[hidden]{display:none}

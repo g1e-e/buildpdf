@@ -77,7 +77,8 @@
     countPages();
   }
 
-  function status(t) { const s = $('#status'); s.textContent = t; s.hidden = !t; }
+  function status(t) { const s = $('#status'); $('#statusText').textContent = t; s.hidden = !t; }
+  $('#statusClose').onclick = () => status('');
 
   let counting = false;
   async function countPages() {
@@ -389,6 +390,171 @@
     if (!confirm('Clear the whole board and saved layout? Your files are not touched.')) return;
     localStorage.removeItem(KEY); files.clear(); expanded.clear(); board = defaultBoard(); save(); status(''); render();
   };
+
+  const FKEY = 'buildpdf.formats';
+  const itemKey = n => {
+    const base = String(n).replace(/\.pdf$/i, '');
+    const stripped = base.replace(/^\s*\d[\d._-]*[\s._-]+/, '');
+    return (stripped.trim() ? stripped : base).trim().replace(/\s+/g, ' ').toLowerCase();
+  };
+  const parentName = p => { const a = p.split('/').filter(Boolean); return a.length > 1 ? a[a.length - 2] : ''; };
+  const loadFormats = () => { try { const f = JSON.parse(localStorage.getItem(FKEY)); return f && typeof f === 'object' && !Array.isArray(f) ? f : {}; } catch (e) { return {}; } };
+  const saveFormats = f => localStorage.setItem(FKEY, JSON.stringify(f));
+  const itemCard = it => typeof it === 'string' ? it : it && it.card;
+
+  function snapshot() {
+    const lists = [], pages = {}, fileKeys = new Set();
+    for (const c of board.cols) {
+      if (c.type !== 'output') continue;
+      const items = c.cards.map(k => {
+        const ck = itemKey(k.name);
+        k.files.forEach(p => fileKeys.add(itemKey(baseName(p))));
+        const foreign = k.files.some(p => itemKey(parentName(p)) !== ck);
+        return foreign ? { card: ck, files: k.files.map(p => itemKey(baseName(p))) } : ck;
+      });
+      lists.push({ name: c.title, items });
+      for (const k of c.cards) for (const p of k.files) if (Array.isArray(board.sel[p])) pages[itemKey(baseName(p))] = board.sel[p].slice();
+    }
+    return { lists, pages, fileKeys };
+  }
+
+  function mergeFormat(old, cur) {
+    const ci = n => String(n).trim().toLowerCase();
+    const curKeys = new Set(cur.lists.flatMap(l => l.items.map(itemCard)));
+    const lists = cur.lists.map(l => ({ name: l.name, items: l.items.slice() }));
+    for (const ol of old.lists || []) {
+      let tgt = lists.find(l => ci(l.name) === ci(ol.name));
+      if (!tgt) { tgt = { name: ol.name, items: [] }; lists.push(tgt); }
+      (ol.items || []).forEach((it, i) => {
+        const k = itemCard(it);
+        if (curKeys.has(k) || tgt.items.some(x => itemCard(x) === k)) return;
+        tgt.items.splice(Math.min(i, tgt.items.length), 0, it);
+      });
+    }
+    const pages = Object.assign({}, old.pages || {});
+    cur.fileKeys.forEach(k => delete pages[k]);
+    Object.assign(pages, cur.pages);
+    return { lists, pages };
+  }
+
+  function applyFormat(fmt) {
+    const ci = n => String(n).trim().toLowerCase();
+    let placed = 0;
+    const notFound = [];
+    const used = new Set();
+    const findCardByKey = key => {
+      for (const c of board.cols) for (const k of c.cards) if (!used.has(k) && itemKey(k.name) === key) return { c, k };
+      return null;
+    };
+    const takeFile = key => {
+      for (const c of board.cols) for (const k of c.cards) {
+        const i = k.files.findIndex(p => itemKey(baseName(p)) === key);
+        if (i >= 0) return k.files.splice(i, 1)[0];
+      }
+      return null;
+    };
+    for (const l of fmt.lists || []) {
+      let col = board.cols.find(c => c.type === 'output' && ci(c.title) === ci(l.name));
+      if (!col) { col = { id: id('c'), type: 'output', title: l.name, cards: [] }; board.cols.push(col); }
+      const ordered = [];
+      for (const it of l.items || []) {
+        const key = itemCard(it);
+        const hit = findCardByKey(key);
+        let card;
+        if (hit) {
+          hit.c.cards.splice(hit.c.cards.indexOf(hit.k), 1);
+          card = hit.k; used.add(card); placed++;
+        } else if (it && Array.isArray(it.files)) {
+          card = { id: id('k'), name: key, files: [] }; used.add(card);
+        } else { notFound.push(key); continue; }
+        if (it && Array.isArray(it.files)) {
+          const got = [];
+          for (const fk of it.files) {
+            const own = card.files.findIndex(p => itemKey(baseName(p)) === fk);
+            if (own >= 0) { got.push(card.files.splice(own, 1)[0]); continue; }
+            const p = takeFile(fk);
+            if (p) { got.push(p); placed++; } else notFound.push(fk);
+          }
+          card.files = got.concat(card.files);
+          if (!hit && !card.files.length) { notFound.push(key); continue; }
+        }
+        ordered.push(card);
+      }
+      col.cards = ordered.concat(col.cards);
+    }
+    let pg = 0;
+    const pages = fmt.pages || {};
+    board.cols.forEach(c => c.cards.forEach(k => k.files.forEach(p => {
+      const fk = itemKey(baseName(p));
+      if (Array.isArray(pages[fk])) { board.sel[p] = pages[fk].filter(Number.isInteger).sort((a, b) => a - b); pg++; }
+    })));
+    board.cols.forEach(c => c.cards = c.cards.filter(k => k.files.length));
+    save(); render();
+    status('Placed ' + placed + ' item' + (placed === 1 ? '' : 's') + '.' + (pg ? ' Applied page selections to ' + pg + ' file' + (pg === 1 ? '' : 's') + '.' : '') + (notFound.length ? ' Not found: ' + notFound.join(', ') : ''));
+  }
+
+  const fSel = $('#formatSelect');
+  function refreshFormats(pick) {
+    const f = loadFormats();
+    const cur = pick !== undefined ? pick : fSel.value;
+    fSel.textContent = '';
+    fSel.append(el('option', { value: '' }, Object.keys(f).length ? 'Choose a format…' : 'No saved formats'));
+    Object.keys(f).sort((a, b) => a.localeCompare(b)).forEach(n => fSel.append(el('option', { value: n }, n)));
+    fSel.value = f[cur] ? cur : '';
+  }
+  const stripSnap = s => ({ lists: s.lists, pages: s.pages });
+  const needSel = () => { if (!fSel.value) { status('Choose a saved format first.'); return null; } return fSel.value; };
+  $('#fmtSave').onclick = () => {
+    const n = (prompt('Name for this format:') || '').trim();
+    if (!n) return;
+    const f = loadFormats();
+    if (f[n] && !confirm(`A format named "${n}" already exists. Overwrite it?`)) return;
+    f[n] = stripSnap(snapshot()); saveFormats(f); refreshFormats(n);
+    status(`Saved format "${n}".`);
+  };
+  $('#fmtLoad').onclick = () => { const n = needSel(); if (n) applyFormat(loadFormats()[n]); };
+  $('#fmtUpdate').onclick = () => {
+    const n = needSel(); if (!n) return;
+    const f = loadFormats(); f[n] = mergeFormat(f[n] || {}, snapshot()); saveFormats(f);
+    status(`Updated format "${n}".`);
+  };
+  $('#fmtRename').onclick = () => {
+    const n = needSel(); if (!n) return;
+    const m = (prompt('New name:', n) || '').trim();
+    if (!m || m === n) return;
+    const f = loadFormats();
+    if (f[m] && !confirm(`A format named "${m}" already exists. Overwrite it?`)) return;
+    f[m] = f[n]; delete f[n]; saveFormats(f); refreshFormats(m);
+  };
+  $('#fmtDelete').onclick = () => {
+    const n = needSel(); if (!n) return;
+    if (!confirm(`Delete the format "${n}"? This can't be undone.`)) return;
+    const f = loadFormats(); delete f[n]; saveFormats(f); refreshFormats('');
+    status(`Deleted format "${n}".`);
+  };
+  $('#fmtExport').onclick = () => {
+    const url = URL.createObjectURL(new Blob([JSON.stringify(loadFormats(), null, 2)], { type: 'application/json' }));
+    const a = el('a', { href: url, download: 'buildpdf-formats.json' });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+  const fIn = $('#fmtFile');
+  $('#fmtImport').onclick = () => { fIn.value = ''; fIn.click(); };
+  fIn.addEventListener('change', async () => {
+    const file = fIn.files[0]; if (!file) return;
+    let data;
+    try { data = JSON.parse(await file.text()); } catch (e) { status('That file is not a valid formats file.'); return; }
+    if (!data || typeof data !== 'object' || Array.isArray(data)) { status('That file is not a valid formats file.'); return; }
+    const f = loadFormats(); let n = 0, skipped = 0;
+    for (const [name, v] of Object.entries(data)) {
+      if (!v || !Array.isArray(v.lists)) { skipped++; continue; }
+      if (f[name] && !confirm(`A format named "${name}" already exists. Overwrite it with the imported one?`)) { skipped++; continue; }
+      f[name] = { lists: v.lists, pages: v.pages && typeof v.pages === 'object' ? v.pages : {} }; n++;
+    }
+    saveFormats(f); refreshFormats();
+    status('Imported ' + n + ' format' + (n === 1 ? '' : 's') + '.' + (skipped ? ' Skipped ' + skipped + '.' : ''));
+  });
+  refreshFormats('');
 
   load();
   render();
