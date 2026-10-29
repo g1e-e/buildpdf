@@ -69,7 +69,7 @@
     }
     delete s.pages;
   });
-  const flat = sec => sec.items.flatMap(it => it.pages.map(i => ({ f: it.f, i })));
+  const flat = sec => sec.items.flatMap(it => it.pages.map(i => ({ f: it.f, i, it })));
   const fmtRanges = arr => { const out = []; for (let k = 0; k < arr.length; k++) { let j = k; while (j + 1 < arr.length && arr[j + 1] === arr[j] + 1) j++; out.push(j > k ? (arr[k] + 1) + '-' + (arr[j] + 1) : String(arr[k] + 1)); k = j; } return out.join(', '); };
   function parseRanges(t, n) {
     const out = [], seen = new Set();
@@ -231,6 +231,7 @@
       initial: n => { f.n = n; return it.pages.filter(i => i < n); },
       hint: 'Pages for "' + sec.title + '". Click to include or leave out. Shift-click toggles a range.',
       onChange: arr => { it.pages = arr.slice().sort((a, b) => a - b); save(); renderToc(); renderPreview(); },
+      onEdit: i => openEditor(sec, it, i),
       onClose: () => changed(true)
     });
   }
@@ -248,6 +249,7 @@
         const rng = el('input', { class: 'sb-range', placeholder: 'Pages, e.g. 1-4, 5, 6-9', 'aria-label': 'Pages of ' + it.f, value: fmtRanges(it.pages) });
         const hint = el('div', { class: 'sb-range-hint', hidden: '' });
         const cnt = el('span', { class: 'count' }, it.pages.length + (n ? '/' + n : '') + ' pg');
+        const ne = annCount(it);
         rng.addEventListener('input', () => {
           const res = parseRanges(rng.value, n);
           rng.classList.toggle('bad', !!res.error);
@@ -260,6 +262,7 @@
         list.append(el('li', { class: 'sb-item' + (loaded ? '' : ' missing') + (it.pages.length ? '' : ' empty'), 'data-id': it.id },
           el('div', { class: 'sb-item-row' },
             el('button', { class: 'sb-item-name', title: loaded ? 'Choose pages' : 'Add this file again to use it', onclick: () => openItem(sec, it) }, '📄 ' + it.f), cnt,
+            ne ? el('button', { class: 'sb-edits', title: 'Remove all edits on this file in this section', onclick: () => { if (confirm('Remove ' + ne + ' edit' + (ne === 1 ? '' : 's') + ' on ' + it.f + ' in "' + sec.title + '"?')) { delete it.ann; changed(true); } } }, '✎ ' + ne + ' ✕') : null,
             el('button', { class: 'icon', title: 'Remove from section', onclick: () => { sec.items.splice(sec.items.indexOf(it), 1); changed(true); } }, '✕')),
           rng, hint));
       });
@@ -372,7 +375,7 @@
           cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
           await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
           page.cleanup();
-          cv.dataset.w = w;
+          cv.dataset.w = w; cv.dataset.dw = v1.width; cv.dataset.dh = v1.height;
           thumbs.set(ck, cv);
           if (thumbs.size > 120) thumbs.delete(thumbs.keys().next().value);
         }
@@ -380,6 +383,8 @@
         let node = cv;
         if (cv.isConnected) { node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = w; node.getContext('2d').drawImage(cv, 0, 0); }
         t.textContent = ''; t.append(node);
+        t.dataset.dw = cv.dataset.dw; t.dataset.dh = cv.dataset.dh;
+        paintAnn(t, t._it, i, +cv.dataset.dw, +cv.dataset.dh);
       } catch (e) { t.textContent = 'Preview unavailable'; }
     }
   }, { root: prevCol, rootMargin: '800px' });
@@ -397,9 +402,10 @@
       if (nt.length) prev.append(el('p', { class: 'sb-prev-note' }, nt.join(' · ')));
       if (!r.refs.length) prev.append(el('p', { class: 'muted sb-prev-empty' }, blocked(r.sec) ? 'No pages (marked).' : 'No pages yet.'));
       r.refs.forEach((p, j) => {
-        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i });
+        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i, title: 'Click to edit this page', onclick: () => openEditor(r.sec, p.it, p.i) });
+        t._it = p.it;
         const cv = thumbs.get(p.f + '\u0000' + p.i + '\u0000' + pw());
-        if (cv) { const node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = cv.dataset.w; node.getContext('2d').drawImage(cv, 0, 0); t.append(node); }
+        if (cv) { const node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = cv.dataset.w; node.getContext('2d').drawImage(cv, 0, 0); t.append(node); paintAnn(t, p.it, p.i, +cv.dataset.dw, +cv.dataset.dh); }
         else t.textContent = 'Loading…';
         prev.append(el('figure', { class: 'sb-fig' }, t, el('figcaption', {}, 'Page ' + (r.from + j) + ' · ' + p.f + ' p' + (p.i + 1))));
         obs.observe(t);
@@ -417,6 +423,279 @@
 
   const winAnsi = s => String(s).replace(/[\u2013\u2014]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[^\x20-\x7E\u00A0-\u00FF]/g, '?');
   const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
+
+  const wrapText = (text, maxW, measure) => {
+    const out = [];
+    String(text).split('\n').forEach(par => {
+      let line = '';
+      par.split(/(\s+)/).forEach(tok => {
+        if (!tok) return;
+        const tryL = line + tok;
+        if (measure(tryL) <= maxW || !line) {
+          if (measure(tryL) > maxW && !line.trim()) {
+            let chunk = '';
+            for (const ch of tok) { if (measure(chunk + ch) > maxW && chunk) { out.push(chunk); chunk = ''; } chunk += ch; }
+            line = chunk;
+          } else line = tryL;
+        } else { out.push(line.replace(/\s+$/, '')); line = tok.trim() ? tok : ''; }
+      });
+      out.push(line.replace(/\s+$/, ''));
+    });
+    return out;
+  };
+  const isInk = o => o.t === 'hl' || o.t === 'pen' || o.t === 'er';
+  function drawInk(ctx, ops) {
+    ops.forEach(o => {
+      if (!isInk(o)) return;
+      ctx.save();
+      ctx.globalCompositeOperation = o.t === 'er' ? 'destination-out' : 'source-over';
+      ctx.globalAlpha = o.t === 'er' ? 1 : (o.o == null ? 1 : o.o);
+      if (o.t === 'hl') { ctx.fillStyle = o.c; ctx.fillRect(o.x, o.y, o.w, o.h); }
+      else {
+        ctx.strokeStyle = o.t === 'er' ? '#000' : o.c; ctx.lineWidth = o.w; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        ctx.beginPath(); o.p.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+        if (o.p.length === 1) ctx.lineTo(o.p[0][0] + 0.01, o.p[0][1]);
+        ctx.stroke();
+      }
+      ctx.restore();
+    });
+  }
+  const FONT = 'Helvetica, Arial, sans-serif';
+  function drawTexts(ctx, ops) {
+    ops.forEach(o => {
+      if (o.t !== 'text' || !o.text) return;
+      ctx.save(); ctx.font = o.size + 'px ' + FONT; ctx.fillStyle = o.c; ctx.textBaseline = 'alphabetic';
+      wrapText(o.text, o.w, s => ctx.measureText(s).width).forEach((ln, k) => ctx.fillText(ln, o.x, o.y + o.size * (0.9 + 1.2 * k)));
+      ctx.restore();
+    });
+  }
+  function paintAnn(t, it, i, dw, dh) {
+    t.querySelectorAll('.sb-ann').forEach(c => c.remove());
+    const ops = it && it.ann && it.ann[i];
+    if (!ops || !ops.length || !dw) return;
+    const dpr = window.devicePixelRatio || 1, W = pw(), k = W / dw * dpr;
+    const cv = el('canvas', { class: 'sb-ann' });
+    cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(W * dh / dw * dpr);
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(k, 0, 0, k, 0, 0); drawInk(ctx, ops);
+    ctx.setTransform(k, 0, 0, k, 0, 0); drawTexts(ctx, ops);
+    t.append(cv);
+  }
+  const annCount = it => Object.values(it.ann || {}).reduce((a, l) => a + l.length, 0);
+
+  const HL = [['Yellow', '#ffe14d'], ['Green', '#5ee27a'], ['Pink', '#ff6fb5'], ['Blue', '#5cc8ff']];
+  const EKEY = 'buildpdf.editor';
+  async function openEditor(sec, it, i) {
+    const f = files.get(it.f);
+    if (!f) { status(it.f + ' is not loaded. Add it again first.'); return; }
+    const pref = Object.assign({ tool: 'text', hl: HL[0][1], ho: 0.35, pc: '#d92d20', pw: 3, es: 18, ts: 14, tc: '#111111', z: 1 }, JSON.parse(localStorage.getItem(EKEY) || '{}'));
+    const savePref = () => localStorage.setItem(EKEY, JSON.stringify(pref));
+    let ops = JSON.parse(JSON.stringify((it.ann && it.ann[i]) || []));
+    let sel = -1, hist = [], fut = [], dw = 612, dh = 792, page = null, bgTimer = null;
+    const s = () => pref.z * 1.5;
+    const snap = () => { hist.push(JSON.stringify(ops)); if (hist.length > 200) hist.shift(); fut = []; };
+    const store = () => { it.ann = it.ann || {}; if (ops.length) it.ann[i] = JSON.parse(JSON.stringify(ops)); else delete it.ann[i]; save(); ub.disabled = !hist.length; rb.disabled = !fut.length; };
+    const bg = el('canvas', { class: 'ed-bg' }), ink = el('canvas', { class: 'ed-ink' }), objs = el('div', { class: 'ed-objs' });
+    const sheet = el('div', { class: 'ed-page' }, bg, ink, objs);
+    const stage = el('div', { class: 'ed-stage' }, sheet);
+    const toolBtn = (k, label, tip) => el('button', { class: 'ed-tool', 'data-tool': k, title: tip, onclick: () => setTool(k) }, label);
+    const num = (v, mn, mx, st, on, lab) => { const n = el('input', { type: 'number', min: mn, max: mx, step: st, value: v, class: 'ed-num', 'aria-label': lab, title: lab }); n.addEventListener('input', () => { const x = +n.value; if (x >= mn && x <= mx) on(x); }); return n; };
+    const rng = (v, mn, mx, st, on, lab) => { const n = el('input', { type: 'range', min: mn, max: mx, step: st, value: v, 'aria-label': lab, title: lab }); n.addEventListener('input', () => on(+n.value)); return n; };
+    const color = (v, on, lab) => { const n = el('input', { type: 'color', value: v, 'aria-label': lab, title: lab }); n.addEventListener('input', () => on(n.value)); return n; };
+    const applySel = (k, v) => { const o = ops[sel]; if (!o) return; snap(); o[k] = v; store(); redraw(); };
+    const optText = el('span', { class: 'ed-opts', 'data-for': 'text select' }, 'Size', num(pref.ts, 6, 96, 1, v => { pref.ts = v; savePref(); if (ops[sel] && ops[sel].t === 'text') applySel('size', v); }, 'Font size'),
+      color(pref.tc, v => { pref.tc = v; savePref(); if (ops[sel] && ops[sel].t === 'text') applySel('c', v); }, 'Text color'));
+    const optHl = el('span', { class: 'ed-opts', 'data-for': 'hl select' }, HL.map(([n, c]) => el('button', { class: 'ed-sw', title: n + ' highlight', 'data-c': c, style: 'background:' + c, onclick: () => { pref.hl = c; savePref(); paintSw(); if (ops[sel] && ops[sel].t === 'hl') applySel('c', c); } })),
+      'Opacity', rng(pref.ho, 0.1, 0.9, 0.05, v => { pref.ho = v; savePref(); if (ops[sel] && ops[sel].t === 'hl') { ops[sel].o = v; store(); redraw(); } }, 'Highlight opacity'));
+    const optPen = el('span', { class: 'ed-opts', 'data-for': 'pen' }, color(pref.pc, v => { pref.pc = v; savePref(); }, 'Pen color'), 'Width', rng(pref.pw, 1, 20, 1, v => { pref.pw = v; savePref(); }, 'Pen width'));
+    const optEr = el('span', { class: 'ed-opts', 'data-for': 'er' }, 'Eraser size', rng(pref.es, 4, 80, 1, v => { pref.es = v; savePref(); }, 'Eraser size'), el('span', { class: 'muted' }, 'Drag to erase highlights and pen. Click an object to delete it.'));
+    const paintSw = () => root2.querySelectorAll('.ed-sw').forEach(b => b.classList.toggle('on', b.dataset.c === pref.hl));
+    const ub = el('button', { title: 'Undo (Ctrl+Z)', onclick: () => undo() }, '↶ Undo'), rb = el('button', { title: 'Redo (Ctrl+Y)', onclick: () => redo() }, '↷ Redo');
+    const db = el('button', { title: 'Delete selected (Del)', onclick: () => del() }, '🗑 Delete');
+    const zc = BP.zoomControl({ target: stage, get: () => pref.z, set: z => { pref.z = z; savePref(); zc.refresh(); layoutSheet(); }, fit: () => (stage.clientWidth - 40) / (dw * 1.5) });
+    const root2 = el('div', { class: 'ed', role: 'dialog', 'aria-label': 'Edit page' },
+      el('div', { class: 'ed-bar' },
+        el('strong', { class: 'ed-title' }, it.f + ' · page ' + (i + 1) + ' · ' + (sec.title || 'Untitled')),
+        el('span', { class: 'ed-tools' }, toolBtn('select', '⬚ Select', 'Select and move (V)'), toolBtn('text', 'T Text', 'Add text (T)'), toolBtn('hl', '▮ Highlight', 'Highlight (H)'), toolBtn('pen', '✎ Pen', 'Pen (P)'), toolBtn('er', '⌫ Eraser', 'Eraser (E)')),
+        optText, optHl, optPen, optEr),
+      el('div', { class: 'ed-bar ed-bar2' }, ub, rb, db,
+        el('button', { title: 'Remove all edits on this page', onclick: () => { if (!ops.length || !confirm('Clear all edits on this page?')) return; snap(); ops = []; sel = -1; store(); redraw(); } }, 'Clear page'),
+        zc, el('span', { class: 'muted' }, 'Ctrl + scroll to zoom'), el('span', { style: 'flex:1' }),
+        el('button', { class: 'primary ed-done', onclick: () => close() }, 'Done')),
+      stage);
+    document.body.append(root2);
+    function setTool(k) {
+      pref.tool = k; savePref(); sel = k === 'select' ? sel : -1;
+      root2.dataset.tool = k;
+      root2.querySelectorAll('.ed-tool').forEach(b => b.classList.toggle('on', b.dataset.tool === k));
+      root2.querySelectorAll('.ed-opts').forEach(o => o.hidden = !o.dataset.for.split(' ').includes(k));
+      sheet.style.setProperty('--es', pref.es * s() + 'px');
+      redraw();
+    }
+    function layoutSheet() {
+      const W = dw * s(), H = dh * s();
+      sheet.style.width = W + 'px'; sheet.style.height = H + 'px';
+      redraw();
+      clearTimeout(bgTimer); bgTimer = setTimeout(drawBg, 150);
+    }
+    async function drawBg() {
+      if (!page) return;
+      const dpr = window.devicePixelRatio || 1, vp = page.getViewport({ scale: s() * dpr });
+      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+      bg.width = c.width; bg.height = c.height; bg.getContext('2d').drawImage(c, 0, 0);
+    }
+    function drawInkLayer(extra) {
+      const dpr = window.devicePixelRatio || 1, k = s() * dpr;
+      ink.width = Math.ceil(dw * k); ink.height = Math.ceil(dh * k);
+      const ctx = ink.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawInk(ctx, extra ? ops.concat(extra) : ops);
+    }
+    function bbox(o) {
+      if (o.t === 'pen') { const xs = o.p.map(p => p[0]), ys = o.p.map(p => p[1]), m = o.w / 2; return { x: Math.min(...xs) - m, y: Math.min(...ys) - m, w: Math.max(...xs) - Math.min(...xs) + 2 * m, h: Math.max(...ys) - Math.min(...ys) + 2 * m }; }
+      return { x: Math.min(o.x, o.x + o.w), y: Math.min(o.y, o.y + o.h), w: Math.abs(o.w), h: Math.abs(o.h) };
+    }
+    function redraw() {
+      drawInkLayer();
+      const z = s(); objs.textContent = '';
+      ops.forEach((o, k) => {
+        if (o.t !== 'text') return;
+        const ta = el('textarea', { class: 'ed-ta', spellcheck: 'false', 'aria-label': 'Text' });
+        ta.value = o.text;
+        ta.style.cssText = 'font-size:' + o.size * z + 'px;color:' + o.c;
+        let edited = false;
+        ta.addEventListener('focus', () => { sel = k; edited = false; markSel(); });
+        ta.addEventListener('input', () => { if (!edited) { snap(); edited = true; } o.text = ta.value; store(); });
+        ta.addEventListener('blur', () => { if (!o.text.trim() && ops.includes(o)) { ops.splice(ops.indexOf(o), 1); sel = -1; store(); redraw(); } });
+        const box = el('div', { class: 'ed-text', 'data-k': k }, ta);
+        box.style.cssText = 'left:' + o.x * z + 'px;top:' + o.y * z + 'px;width:' + o.w * z + 'px;height:' + o.h * z + 'px';
+        objs.append(box);
+      });
+      if (sel >= 0 && ops[sel] && pref.tool === 'select') {
+        const b = bbox(ops[sel]);
+        const sb = el('div', { class: 'ed-sel' }, ops[sel].t === 'pen' ? null : el('span', { class: 'ed-rs', title: 'Resize' }));
+        sb.style.cssText = 'left:' + b.x * z + 'px;top:' + b.y * z + 'px;width:' + b.w * z + 'px;height:' + b.h * z + 'px';
+        objs.append(sb);
+      }
+      markSel();
+      ub.disabled = !hist.length; rb.disabled = !fut.length; db.disabled = !(sel >= 0 && ops[sel]);
+    }
+    const markSel = () => { objs.querySelectorAll('.ed-text').forEach(b => b.classList.toggle('on', +b.dataset.k === sel)); db.disabled = !(sel >= 0 && ops[sel]); };
+    const pt = e => { const r = sheet.getBoundingClientRect(); return [(e.clientX - r.left) / s(), (e.clientY - r.top) / s()]; };
+    function hit(x, y, inkOnly) {
+      for (let k = ops.length - 1; k >= 0; k--) {
+        const o = ops[k];
+        if (o.t === 'er' || (inkOnly && o.t === 'text')) continue;
+        if (o.t === 'pen') { if (o.p.some(([a, b]) => Math.hypot(a - x, b - y) <= o.w / 2 + 4)) return k; continue; }
+        const b = bbox(o); if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return k;
+      }
+      return -1;
+    }
+    function drag(e, move, up) {
+      e.preventDefault();
+      const id2 = e.pointerId; sheet.setPointerCapture && sheet.setPointerCapture(id2);
+      const mv = ev => { if (ev.pointerId === id2) move(pt(ev), ev); };
+      const end = ev => { if (ev.pointerId !== id2) return; sheet.removeEventListener('pointermove', mv); sheet.removeEventListener('pointerup', end); sheet.removeEventListener('pointercancel', end); up && up(pt(ev)); };
+      sheet.addEventListener('pointermove', mv); sheet.addEventListener('pointerup', end); sheet.addEventListener('pointercancel', end);
+    }
+    sheet.addEventListener('pointerdown', e => {
+      if (e.button) return;
+      const [x, y] = pt(e), tool = pref.tool, tbox = e.target.closest('.ed-text');
+      if (tool === 'text') {
+        if (tbox) return;
+        e.preventDefault();
+        snap(); ops.push({ t: 'text', x, y: y - pref.ts * 0.6, w: Math.min(220, dw - x), h: pref.ts * 2.6, text: '', size: pref.ts, c: pref.tc });
+        sel = ops.length - 1; store(); redraw();
+        const ta = objs.querySelector('.ed-text[data-k="' + sel + '"] textarea'); hist.pop(); ta && setTimeout(() => ta.focus());
+        hist.push(JSON.stringify(ops.slice(0, -1)));
+        return;
+      }
+      if (tool === 'hl') {
+        const o = { t: 'hl', x, y, w: 0, h: 0, c: pref.hl, o: pref.ho };
+        drag(e, ([a, b]) => { o.w = a - x; o.h = b - y; drawInkLayer(o); }, () => {
+          if (Math.abs(o.w) < 2 || Math.abs(o.h) < 2) { drawInkLayer(); return; }
+          const b = bbox(o); snap(); ops.push(Object.assign(o, b)); store(); redraw();
+        });
+        return;
+      }
+      if (tool === 'pen' || tool === 'er') {
+        if (tool === 'er' && tbox) { snap(); ops.splice(+tbox.dataset.k, 1); sel = -1; store(); redraw(); e.preventDefault(); return; }
+        const o = tool === 'pen' ? { t: 'pen', p: [[x, y]], c: pref.pc, w: pref.pw, o: 1 } : { t: 'er', p: [[x, y]], w: pref.es };
+        let far = 0;
+        drag(e, ([a, b]) => { const l = o.p[o.p.length - 1]; if (Math.hypot(a - l[0], b - l[1]) < 0.6) return; far = Math.max(far, Math.hypot(a - x, b - y)); o.p.push([+a.toFixed(1), +b.toFixed(1)]); drawInkLayer(o); }, () => {
+          if (tool === 'er' && far < 3) { const k = hit(x, y, true); drawInkLayer(); if (k >= 0) { snap(); ops.splice(k, 1); store(); redraw(); } return; }
+          snap(); ops.push(o); store(); redraw();
+        });
+        return;
+      }
+      const rs = e.target.closest('.ed-rs');
+      const k = rs ? sel : tbox ? +tbox.dataset.k : hit(x, y);
+      sel = k; redraw();
+      if (k < 0) return;
+      const o = ops[k], start = JSON.stringify(ops), o0 = JSON.parse(JSON.stringify(o));
+      let movedAny = false;
+      drag(e, ([a, b]) => {
+        const dx = a - x, dy = b - y; movedAny = true;
+        if (rs) { o.w = Math.max(10, o0.w + dx); o.h = Math.max(8, o0.h + dy); }
+        else if (o.t === 'pen') o.p = o0.p.map(([px, py]) => [px + dx, py + dy]);
+        else { o.x = o0.x + dx; o.y = o0.y + dy; }
+        redraw();
+      }, () => { if (movedAny) { hist.push(start); fut = []; store(); redraw(); } });
+    });
+    function del() { if (!(sel >= 0 && ops[sel])) return; snap(); ops.splice(sel, 1); sel = -1; store(); redraw(); }
+    function undo() { if (!hist.length) return; fut.push(JSON.stringify(ops)); ops = JSON.parse(hist.pop()); sel = -1; store(); redraw(); }
+    function redo() { if (!fut.length) return; hist.push(JSON.stringify(ops)); ops = JSON.parse(fut.pop()); sel = -1; store(); redraw(); }
+    const key = e => {
+      const typing = e.target.closest && e.target.closest('textarea,input');
+      if (e.key === 'Escape') { e.stopImmediatePropagation(); if (typing) e.target.blur(); else close(); return; }
+      if (typing) return;
+      const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+      if (c && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+      else if (c && k === 'y') { e.preventDefault(); redo(); }
+      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); del(); }
+      else if (!c && { v: 'select', t: 'text', h: 'hl', p: 'pen', e: 'er' }[k]) setTool({ v: 'select', t: 'text', h: 'hl', p: 'pen', e: 'er' }[k]);
+    };
+    document.addEventListener('keydown', key, true);
+    function close() {
+      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+      document.removeEventListener('keydown', key, true);
+      root2.remove(); store(); renderSections(); renderPreview();
+      const n = (it.ann && it.ann[i] || []).length;
+      status(n ? 'Saved ' + n + ' edit' + (n === 1 ? '' : 's') + ' on ' + it.f + ' page ' + (i + 1) + '.' : 'No edits on ' + it.f + ' page ' + (i + 1) + '.');
+    }
+    paintSw(); setTool(pref.tool);
+    try {
+      const doc = await getDoc(it.f);
+      page = await doc.getPage(i + 1);
+      const v = page.getViewport({ scale: 1 }); dw = v.width; dh = v.height;
+    } catch (e) { status('This page could not be opened for editing.'); }
+    layoutSheet(); drawBg();
+  }
+
+  async function flatten(out, cp, ops, font) {
+    const { degrees, rgb } = PDFLib;
+    const r = ((cp.getRotation().angle % 360) + 360) % 360;
+    const cb = cp.getCropBox(), x0 = cb.x, y0 = cb.y, w = cb.width, h = cb.height;
+    if (ops.some(o => o.t === 'hl' || o.t === 'pen')) {
+      const k = 2, Iw = Math.ceil(w * k), Ih = Math.ceil(h * k);
+      const c = document.createElement('canvas'); c.width = Iw; c.height = Ih;
+      const ctx = c.getContext('2d');
+      const T = { 0: [k, 0, 0, k, 0, 0], 90: [0, -k, k, 0, 0, Ih], 180: [-k, 0, 0, -k, Iw, Ih], 270: [0, k, -k, 0, Iw, 0] }[r] || [k, 0, 0, k, 0, 0];
+      ctx.setTransform(...T); drawInk(ctx, ops);
+      const blob = await new Promise(res => c.toBlob(res, 'image/png'));
+      const img = await out.embedPng(await blob.arrayBuffer());
+      cp.drawImage(img, { x: x0, y: y0, width: w, height: h });
+    }
+    const map = (X, Y) => ({ 0: [x0 + X, y0 + h - Y], 90: [x0 + Y, y0 + X], 180: [x0 + w - X, y0 + Y], 270: [x0 + w - Y, y0 + h - X] }[r] || [x0 + X, y0 + h - Y]);
+    const hex = c => { const m = /^#?([0-9a-f]{6})$/i.exec(c || ''); const n = m ? parseInt(m[1], 16) : 0; return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
+    ops.forEach(o => {
+      if (o.t !== 'text' || !o.text) return;
+      wrapText(winAnsi(o.text), o.w, s => font.widthOfTextAtSize(s, o.size)).forEach((ln, j) => {
+        if (!ln) return;
+        const [x, y] = map(o.x, o.y + o.size * (0.9 + 1.2 * j));
+        cp.drawText(ln, { x, y, size: o.size, font, color: hex(o.c), rotate: degrees(r) });
+      });
+    });
+  }
 
   async function build() {
     const L = layout();
@@ -452,6 +731,7 @@
         });
       }
       const firstPage = new Map();
+      let annFont = null;
       let done = 0;
       for (const r of L) {
         for (const p of r.refs) {
@@ -463,6 +743,8 @@
             if (p.i >= src.getPageCount()) throw new Error('range');
             const [cp] = await out.copyPages(src, [p.i]);
             out.addPage(cp);
+            const ann = p.it && p.it.ann && p.it.ann[p.i];
+            if (ann && ann.length) { annFont = annFont || await out.embedFont(StandardFonts.Helvetica); await flatten(out, cp, ann, annFont); }
             if (!firstPage.has(r.sec.id)) firstPage.set(r.sec.id, cp);
           } catch (e) { problems.push(p.f + ' p' + (p.i + 1)); }
         }
