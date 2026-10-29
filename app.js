@@ -282,7 +282,27 @@
   let picker = null;
   const SIZES = { S: 200, M: 300, L: 400 };
   const SKEY = 'buildpdf.thumbSize';
-  const thumbSize = () => { const v = localStorage.getItem(SKEY); return SIZES[v] ? v : 'L'; };
+  const WKEY = 'buildpdf.pickerZoom';
+  const clampZ = z => Math.min(4, Math.max(0.25, z));
+  const pickerZoom = () => { const z = parseFloat(localStorage.getItem(WKEY)); if (z > 0) return clampZ(z); const v = localStorage.getItem(SKEY); return SIZES[v] ? SIZES[v] / 400 : 1; };
+
+  function zoomControl(o) {
+    const pct = el('button', { class: 'zc-pct', title: 'Reset to 100%', onclick: () => o.set(1) });
+    const show = () => { pct.textContent = Math.round(o.get() * 100) + '%'; };
+    const box = el('div', { class: 'zc', role: 'group', 'aria-label': 'Zoom' },
+      el('button', { class: 'zc-out', title: 'Zoom out', onclick: () => o.set(clampZ(o.get() / 1.2)) }, '−'), pct,
+      el('button', { class: 'zc-in', title: 'Zoom in', onclick: () => o.set(clampZ(o.get() * 1.2)) }, '+'),
+      o.fit ? el('button', { class: 'zc-fit', title: 'Fit width', onclick: () => o.set(clampZ(o.fit())) }, 'Fit') : null,
+      (o.presets || []).map(([n, z]) => el('button', { class: 'zc-pre', title: 'Size ' + n, onclick: () => o.set(z) }, n)));
+    o.target.addEventListener('wheel', e => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      o.set(clampZ(o.get() * Math.exp(-e.deltaY * 0.0025)));
+    }, { passive: false });
+    show();
+    box.refresh = show;
+    return box;
+  }
 
   function closePicker(done) {
     if (!picker) return;
@@ -309,12 +329,14 @@
   async function openPickerFor(opts) {
     closePicker();
     const grid = el('div', { class: 'pk-grid' }, el('p', { class: 'muted' }, 'Loading pages…'));
+    let zoom = pickerZoom(), settle = null;
+    const zc = zoomControl({ target: grid, get: () => zoom, set: z => setZoom(z), fit: () => (grid.clientWidth - 60) / 400, presets: Object.entries(SIZES).map(([n, w]) => [n, w / 400]) });
     const counter = el('span', { class: 'pk-count' });
     const root = el('div', { class: 'overlay pk', onclick: e => { if (e.target === root) closePicker(!opts.onDone); } },
       el('div', { class: 'pk-box', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose pages' },
         el('div', { class: 'pk-head' },
           el('strong', { class: 'pk-title' }, opts.title), counter,
-          el('div', { class: 'pk-size', role: 'group', 'aria-label': 'Thumbnail size' }, Object.keys(SIZES).map(z => el('button', { class: 'pk-sz' + (z === thumbSize() ? ' on' : ''), 'data-size': z, title: 'Thumbnail size ' + z, onclick: () => setSize(z) }, z))),
+          zc,
           el('button', { onclick: () => setAll(true) }, 'Select all'),
           el('button', { onclick: () => setAll(false) }, 'Deselect all'),
           el('button', { class: 'primary pk-done', onclick: () => closePicker(true) }, opts.doneLabel || 'Done'),
@@ -322,14 +344,14 @@
         el('p', { class: 'muted pk-hint' }, opts.hint || 'Click a page to include or leave it out. Shift-click to toggle a range.'),
         grid));
     document.body.append(root);
-    const applySize = () => root.style.setProperty('--tw', SIZES[thumbSize()] + 'px');
+    const tw = () => Math.round(400 * zoom);
+    const applySize = () => root.style.setProperty('--tw', tw() + 'px');
     applySize();
-    function setSize(z) {
-      if (z === thumbSize()) return;
-      localStorage.setItem(SKEY, z); applySize();
-      root.querySelectorAll('.pk-sz').forEach(b => b.classList.toggle('on', b.dataset.size === z));
-      if (!me.doc) return;
-      me.thumbs.forEach(t => { t.querySelector('.pk-img').textContent = ''; me.obs.unobserve(t); me.obs.observe(t); });
+    function setZoom(z) {
+      zoom = clampZ(z);
+      localStorage.setItem(WKEY, zoom.toFixed(3)); applySize(); zc.refresh();
+      clearTimeout(settle);
+      settle = setTimeout(() => { if (picker === me && me.doc) me.thumbs.forEach(t => { const c = t.querySelector('canvas'); if (!c || +c.dataset.w !== tw()) { me.obs.unobserve(t); me.obs.observe(t); } }); }, 200);
     }
     const me = picker = { opts, root, obs: new IntersectionObserver(onSeen, { root: grid, rootMargin: '300px' }), doc: null, sel: null, n: 0, last: null, thumbs: [] };
     function paint() {
@@ -353,13 +375,16 @@
           const page = await me.doc.getPage(+t.dataset.i + 1);
           if (picker !== me) return;
           const v1 = page.getViewport({ scale: 1 });
-          const w = SIZES[thumbSize()];
+          const w = tw();
+          const old = t.querySelector('canvas');
+          if (old && +old.dataset.w === w) continue;
           const vp = page.getViewport({ scale: w / v1.width * (window.devicePixelRatio || 1) });
           const cv = document.createElement('canvas');
           cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
           await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
           if (picker !== me) return;
-          if (w !== SIZES[thumbSize()]) { page.cleanup(); continue; }
+          if (w !== tw()) { page.cleanup(); continue; }
+          cv.dataset.w = w;
           const img = t.querySelector('.pk-img'); img.textContent = ''; img.append(cv);
           page.cleanup();
         } catch (e) { t.querySelector('.pk-img').textContent = 'Preview unavailable'; }
@@ -640,7 +665,7 @@
   setInterval(checkVersion, 5 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
 
-  Object.assign(BP, { el, status, pdfjs, openPicker: openPickerFor, readDropped, VERSION, baseName, isPdf });
+  Object.assign(BP, { zoomControl, clampZ, el, status, pdfjs, openPicker: openPickerFor, readDropped, VERSION, baseName, isPdf });
   BP.register({ id: 'board', name: 'Board builder', el: document.getElementById('builder-board') });
   load();
   render();

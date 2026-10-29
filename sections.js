@@ -61,12 +61,35 @@
   let S;
   try { S = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
   if (!S || !Array.isArray(S.sections)) S = blank();
-  S.sections.forEach(s => { s.fields = s.fields || []; s.values = s.values || {}; s.pages = s.pages || []; });
+  S.sections.forEach(s => {
+    s.fields = s.fields || []; s.values = s.values || {};
+    if (!Array.isArray(s.items)) {
+      s.items = [];
+      (s.pages || []).forEach(p => { const last = s.items[s.items.length - 1]; if (last && last.f === p.f) last.pages.push(p.i); else s.items.push({ id: id(), f: p.f, pages: [p.i] }); });
+    }
+    delete s.pages;
+  });
+  const flat = sec => sec.items.flatMap(it => it.pages.map(i => ({ f: it.f, i })));
+  const fmtRanges = arr => { const out = []; for (let k = 0; k < arr.length; k++) { let j = k; while (j + 1 < arr.length && arr[j + 1] === arr[j] + 1) j++; out.push(j > k ? (arr[k] + 1) + '-' + (arr[j] + 1) : String(arr[k] + 1)); k = j; } return out.join(', '); };
+  function parseRanges(t, n) {
+    const out = [], seen = new Set();
+    const parts = String(t).split(/[,;\s]+/).filter(Boolean);
+    for (const p of parts) {
+      const m = /^(\d+)(?:\s*[-–]\s*(\d+))?$/.exec(p.replace(/\s+/g, ''));
+      if (!m) return { error: '"' + p + '" is not a page or range' };
+      let a = +m[1], b = m[2] ? +m[2] : a;
+      if (a < 1 || b < 1) return { error: 'Pages start at 1' };
+      if (n && (a > n || b > n)) return { error: 'This file has ' + n + ' page' + (n === 1 ? '' : 's') };
+      const step = a <= b ? 1 : -1;
+      for (let x = a; step > 0 ? x <= b : x >= b; x += step) if (!seen.has(x)) { seen.add(x); out.push(x - 1); }
+    }
+    return { pages: out };
+  }
   const save = () => localStorage.setItem(KEY, JSON.stringify(S));
   const loadTemplates = () => { try { const t = JSON.parse(localStorage.getItem(TKEY)); return t && typeof t === 'object' && !Array.isArray(t) ? t : {}; } catch (e) { return {}; } };
   const allTemplates = () => Object.assign({}, loadTemplates(), BUILTIN);
   const blocked = sec => sec.fields.some(f => FIELDS[f.type] && FIELDS[f.type].blocks(sec, f));
-  const newSection = t => ({ id: id(), title: t.title || 'New section', fields: JSON.parse(JSON.stringify(t.fields || [])), values: {}, pages: [] });
+  const newSection = t => ({ id: id(), title: t.title || 'New section', fields: JSON.parse(JSON.stringify(t.fields || [])), values: {}, items: [] });
 
   function tocCount() {
     if (!S.toc) return 0;
@@ -78,7 +101,7 @@
     const start = tocCount() + 1;
     let n = start;
     return S.sections.map(sec => {
-      const refs = blocked(sec) ? [] : sec.pages.filter(p => files.has(p.f));
+      const refs = blocked(sec) ? [] : flat(sec).filter(p => files.has(p.f));
       const r = { sec, from: refs.length ? n : 0, to: refs.length ? n + refs.length - 1 : 0, refs };
       n += refs.length;
       return r;
@@ -129,7 +152,7 @@
     Object.keys(loadTemplates()).filter(n => !BUILTIN[n]).sort().forEach(n => tplSel.append(el('option', { value: n }, n)));
     tplSel.value = t[cur] ? cur : (S.name && t[S.name] ? S.name : Object.keys(BUILTIN)[0]);
   }
-  function hasContent() { return S.sections.some(s => s.pages.length || Object.values(s.values).some(v => v && (v === true || v.start || v.end))); }
+  function hasContent() { return S.sections.some(s => s.items.length || Object.values(s.values).some(v => v && (v === true || v.start || v.end))); }
   function loadTemplate() {
     const t = allTemplates()[tplSel.value];
     if (!t) return;
@@ -165,55 +188,108 @@
 
   function addFiles(entries) {
     let added = 0, skipped = 0;
+    const out = [];
     for (const { path, file } of entries) {
       if (!BP.isPdf(file.name)) { skipped++; continue; }
       const key = files.has(file.name) && files.get(file.name).path !== path ? path : file.name;
-      const known = S.sections.some(s => s.pages.some(p => p.f === path)) ? path : key;
+      const known = S.sections.some(s => s.items.some(p => p.f === path)) ? path : key;
       files.set(known, { file, path, n: null });
       docs.delete(known);
       [...thumbs.keys()].forEach(k => { if (k.startsWith(known + '\u0000')) thumbs.delete(k); });
       added++;
+      out.push(known);
     }
     changed(true);
-    status('Added ' + added + ' PDF' + (added === 1 ? '' : 's') + '.' + (skipped ? ' Skipped ' + skipped + ' non-PDF file' + (skipped === 1 ? '' : 's') + '.' : ''));
+    status('Added ' + added + ' PDF' + (added === 1 ? '' : 's') + '. Drag them into a section.' + (skipped ? ' Skipped ' + skipped + ' non-PDF file' + (skipped === 1 ? '' : 's') + '.' : ''));
+    return out;
+  }
+  const pageCount = async k => { const f = files.get(k); if (!f) return 0; if (f.n) return f.n; try { return (await getDoc(k)).numPages; } catch (e) { return 0; } };
+  async function addItem(sec, k, at) {
+    if (blocked(sec) || !files.has(k)) return;
+    const n = await pageCount(k);
+    const it = { id: id(), f: k, pages: [...Array(n).keys()] };
+    if (at == null || at > sec.items.length) sec.items.push(it); else sec.items.splice(at, 0, it);
+    changed(true);
+    status('Added ' + k + ' to "' + sec.title + '" (all ' + n + ' pages). Click its name to choose pages, or type page ranges.');
   }
 
   function renderTray() {
     tray.textContent = '';
     const needed = new Set();
-    S.sections.forEach(s => s.pages.forEach(p => { if (!files.has(p.f)) needed.add(p.f); }));
+    S.sections.forEach(s => s.items.forEach(p => { if (!files.has(p.f)) needed.add(p.f); }));
     if (!files.size && !needed.size) { tray.append(el('span', { class: 'muted' }, 'No files yet.')); return; }
-    for (const [k, f] of files) tray.append(el('span', { class: 'sb-file', title: f.path }, '📄 ' + k, f.n ? el('span', { class: 'count' }, ' ' + f.n + ' pg') : null,
+    for (const [k, f] of files) tray.append(el('span', { class: 'sb-file', draggable: 'true', 'data-f': k, title: 'Drag into a section · ' + f.path, ondragstart: e => { e.dataTransfer.setData('application/x-buildpdf-file', k); e.dataTransfer.setData('text/plain', k); e.dataTransfer.effectAllowed = 'copy'; } }, '📄 ' + k, f.n ? el('span', { class: 'count' }, ' ' + f.n + ' pg') : null,
       el('button', { class: 'icon', title: 'Remove from tray', onclick: () => { files.delete(k); docs.delete(k); changed(true); } }, '✕')));
     for (const k of needed) tray.append(el('span', { class: 'sb-file missing', title: 'Add this file again to use its pages' }, '⚠ ' + k + ' (not loaded)'));
   }
 
+  function openItem(sec, it) {
+    const f = files.get(it.f);
+    if (!f) { status(it.f + ' is not loaded. Add it again first.'); return; }
+    BP.openPicker({
+      file: f.file, title: it.f + ' → ' + sec.title,
+      initial: n => { f.n = n; return it.pages.filter(i => i < n); },
+      hint: 'Pages for "' + sec.title + '". Click to include or leave out. Shift-click toggles a range.',
+      onChange: arr => { it.pages = arr.slice().sort((a, b) => a - b); save(); renderToc(); renderPreview(); },
+      onClose: () => changed(true)
+    });
+  }
+  const accepts = e => e.dataTransfer && [...e.dataTransfer.types].some(t => t === 'application/x-buildpdf-file' || t === 'Files');
   function renderSections() {
     secList.textContent = '';
     S.sections.forEach((sec, idx) => {
       const title = el('input', { class: 'sb-title', value: sec.title, 'aria-label': 'Section title' });
       title.addEventListener('input', () => { sec.title = title.value; save(); renderToc(); renderPreview(); });
       const isBlocked = blocked(sec);
-      const chips = el('ul', { class: 'sb-chips', 'data-sec': sec.id });
-      sec.pages.forEach((p, i) => chips.append(el('li', { class: 'sb-chip' + (files.has(p.f) ? '' : ' missing'), 'data-i': i, title: p.f + ', page ' + (p.i + 1) },
-        el('span', { class: 'handle' }, '⠿'), el('span', { class: 'sb-chip-t' }, p.f.replace(/\.pdf$/i, '') + ' · p' + (p.i + 1)),
-        el('button', { class: 'icon', title: 'Remove page', onclick: () => { sec.pages.splice(i, 1); changed(true); } }, '✕'))));
+      const list = el('ul', { class: 'sb-items', 'data-sec': sec.id });
+      sec.items.forEach(it => {
+        const loaded = files.has(it.f);
+        const n = loaded ? files.get(it.f).n : 0;
+        const rng = el('input', { class: 'sb-range', placeholder: 'Pages, e.g. 1-4, 5, 6-9', 'aria-label': 'Pages of ' + it.f, value: fmtRanges(it.pages) });
+        const hint = el('div', { class: 'sb-range-hint', hidden: '' });
+        const cnt = el('span', { class: 'count' }, it.pages.length + (n ? '/' + n : '') + ' pg');
+        rng.addEventListener('input', () => {
+          const res = parseRanges(rng.value, n);
+          rng.classList.toggle('bad', !!res.error);
+          hint.hidden = !res.error; hint.textContent = res.error || '';
+          if (res.error) return;
+          it.pages = res.pages; cnt.textContent = it.pages.length + (n ? '/' + n : '') + ' pg';
+          save(); renderToc(); renderPreview();
+        });
+        rng.addEventListener('change', () => { if (!rng.classList.contains('bad')) rng.value = fmtRanges(it.pages); });
+        list.append(el('li', { class: 'sb-item' + (loaded ? '' : ' missing') + (it.pages.length ? '' : ' empty'), 'data-id': it.id },
+          el('div', { class: 'sb-item-row' },
+            el('button', { class: 'sb-item-name', title: loaded ? 'Choose pages' : 'Add this file again to use it', onclick: () => openItem(sec, it) }, '📄 ' + it.f), cnt,
+            el('button', { class: 'icon', title: 'Remove from section', onclick: () => { sec.items.splice(sec.items.indexOf(it), 1); changed(true); } }, '✕')),
+          rng, hint));
+      });
       const card = el('div', { class: 'sb-card' + (isBlocked ? ' blocked' : ''), 'data-sec': sec.id },
         el('div', { class: 'sb-card-head' },
-          el('span', { class: 'handle sb-handle', title: 'Drag to reorder' }, '⠿'),
           el('span', { class: 'sb-num' }, 'Section ' + (idx + 1) + ':'), title,
-          el('button', { class: 'icon', title: 'Delete section', onclick: () => { if ((sec.pages.length || hasValues(sec)) && !confirm('Delete "' + sec.title + '"?')) return; S.sections.splice(S.sections.indexOf(sec), 1); changed(true); } }, '✕')),
-        el('button', { class: 'sb-insert', onclick: () => insertPages(sec) }, 'Insert pages'),
+          el('button', { class: 'icon', title: 'Delete section', onclick: () => { if ((sec.items.length || hasValues(sec)) && !confirm('Delete "' + sec.title + '"?')) return; S.sections.splice(S.sections.indexOf(sec), 1); changed(true); } }, '✕')),
         sec.fields.map(f => FIELDS[f.type] ? FIELDS[f.type].render(sec, f, changed) : null),
         isBlocked ? el('div', { class: 'sb-marked' }, notes(sec).join(' · ') || 'Marked') : null,
-        chips);
+        list,
+        el('div', { class: 'sb-dropzone' }, isBlocked ? 'No pages for this section' : sec.items.length ? 'Drop another PDF here' : 'Drop a PDF here'),
+        el('button', { class: 'sb-insert small', onclick: () => insertPages(sec) }, 'Insert pages…'));
       if (isBlocked) card.querySelector('.sb-insert').disabled = true;
+      card.addEventListener('dragover', e => { if (!accepts(e) || isBlocked) return; e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect = 'copy'; card.classList.add('over'); });
+      card.addEventListener('dragleave', e => { if (!card.contains(e.relatedTarget)) card.classList.remove('over'); });
+      card.addEventListener('drop', async e => {
+        if (!accepts(e)) return;
+        e.preventDefault(); e.stopPropagation(); card.classList.remove('over');
+        if (isBlocked) return;
+        const k = e.dataTransfer.getData('application/x-buildpdf-file');
+        if (k) { addItem(sec, k); return; }
+        const keys = addFiles(await BP.readDropped(e.dataTransfer.items));
+        for (const key of keys) await addItem(sec, key);
+      });
       secList.append(card);
-      Sortable.create(chips, { handle: '.handle', animation: 120, onEnd: e => { if (e.oldIndex === e.newIndex) return; const [m] = sec.pages.splice(e.oldIndex, 1); sec.pages.splice(e.newIndex, 0, m); changed(true); } });
+      Sortable.create(list, { animation: 120, filter: 'input,button,.sb-range-hint', preventOnFilter: false, delayOnTouchOnly: true, delay: 150, onEnd: e => { if (e.oldIndex === e.newIndex) return; const [m] = sec.items.splice(e.oldIndex, 1); sec.items.splice(e.newIndex, 0, m); changed(true); } });
     });
   }
   const hasValues = sec => Object.values(sec.values).some(v => v && (v === true || v.start || v.end));
-  Sortable.create(secList, { handle: '.sb-handle', animation: 150, onEnd: e => { if (e.oldIndex === e.newIndex) return; const [m] = S.sections.splice(e.oldIndex, 1); S.sections.splice(e.newIndex, 0, m); changed(true); } });
+  Sortable.create(secList, { animation: 150, draggable: '.sb-card', filter: 'input,button,select,textarea,label,.sb-item,.sb-items', preventOnFilter: false, delayOnTouchOnly: true, delay: 150, onEnd: e => { if (e.oldIndex === e.newIndex) return; const [m] = S.sections.splice(e.oldIndex, 1); S.sections.splice(e.newIndex, 0, m); changed(true); } });
 
   function chooseFile(sec) {
     return new Promise(res => {
@@ -239,8 +315,8 @@
     BP.openPicker({
       file: files.get(k).file, title: k + ' → ' + sec.title,
       initial: () => [], doneLabel: 'Add pages',
-      hint: 'Click the pages to add to "' + sec.title + '". They are added in page order. Shift-click selects a range.',
-      onDone: (arr, n) => { files.get(k).n = n; arr.forEach(i => sec.pages.push({ f: k, i })); if (arr.length) status('Added ' + arr.length + ' page' + (arr.length === 1 ? '' : 's') + ' to "' + sec.title + '".'); changed(true); }
+      hint: 'Click the pages to add to "' + sec.title + '". Shift-click selects a range.',
+      onDone: (arr, n) => { files.get(k).n = n; if (arr.length) { sec.items.push({ id: id(), f: k, pages: arr }); status('Added ' + arr.length + ' page' + (arr.length === 1 ? '' : 's') + ' of ' + k + ' to "' + sec.title + '".'); } changed(true); }
     });
   }
 
@@ -252,7 +328,7 @@
     if (!L.length) tocEl.append(el('p', { class: 'muted' }, 'Add a section or load a template.'));
     L.forEach((r, i) => {
       const nt = notes(r.sec);
-      tocEl.append(el('button', { class: 'sb-toc-item', onclick: () => { const h = prev.querySelector('[data-head="' + r.sec.id + '"]'); if (h) prevCol.scrollTo({ top: h.offsetTop - prev.offsetTop, behavior: 'smooth' }); } },
+      tocEl.append(el('button', { class: 'sb-toc-item', onclick: () => { const h = prev.querySelector('[data-head="' + r.sec.id + '"]'); if (h) prevCol.scrollTo({ top: h.offsetTop - 44, behavior: 'smooth' }); } },
         el('span', { class: 'sb-toc-t' }, (i + 1) + '. ' + (r.sec.title || 'Untitled')), el('span', { class: 'sb-toc-pg' }, range(r) || (blocked(r.sec) ? '' : 'no pages')),
         nt.length ? el('span', { class: 'sb-toc-note' }, nt.join(' · ')) : null));
     });
@@ -262,33 +338,55 @@
     if (!docs.has(k)) docs.set(k, (async () => { const lib = await BP.pdfjs(); const d = await lib.getDocument({ data: new Uint8Array(await files.get(k).file.arrayBuffer()), isEvalSupported: false, useSystemFonts: true }).promise; files.get(k).n = d.numPages; return d; })());
     return docs.get(k);
   };
-  const W = 340;
+  const ZKEY = 'buildpdf.previewZoom';
+  const BASE = 600;
+  let zoom = BP.clampZ(parseFloat(localStorage.getItem(ZKEY)) || 1), settle = null;
+  const pw = () => Math.round(BASE * zoom);
+  const applyZoom = () => prev.style.setProperty('--pw', pw() + 'px');
+  function setZoom(z) {
+    const ratio = prevCol.scrollHeight ? prevCol.scrollTop / prevCol.scrollHeight : 0;
+    zoom = BP.clampZ(z);
+    localStorage.setItem(ZKEY, zoom.toFixed(3));
+    applyZoom(); zc.refresh();
+    prevCol.scrollTop = ratio * prevCol.scrollHeight;
+    clearTimeout(settle);
+    settle = setTimeout(() => prev.querySelectorAll('.sb-page').forEach(t => { const c = t.querySelector('canvas'); if (!c || +c.dataset.w !== pw()) { obs.unobserve(t); obs.observe(t); } }), 200);
+  }
+  const zc = BP.zoomControl({ target: prevCol, get: () => zoom, set: setZoom, fit: () => (prevCol.clientWidth - 48) / BASE });
+  prevCol.prepend(el('div', { class: 'sb-zoombar' }, el('span', { class: 'muted' }, 'Preview'), zc, el('span', { class: 'muted sb-zoomhint' }, 'Ctrl + scroll or pinch to zoom')));
+  applyZoom();
   const obs = new IntersectionObserver(async ents => {
     for (const en of ents) {
       if (!en.isIntersecting) continue;
       const t = en.target; obs.unobserve(t);
-      const k = t.dataset.f, i = +t.dataset.i, ck = k + '\u0000' + i;
+      const k = t.dataset.f, i = +t.dataset.i, w = pw(), ck = k + '\u0000' + i + '\u0000' + w;
+      const old = t.querySelector('canvas');
+      if (old && +old.dataset.w === w) continue;
       try {
         let cv = thumbs.get(ck);
         if (!cv) {
           const doc = await getDoc(k);
           const page = await doc.getPage(i + 1);
           const v1 = page.getViewport({ scale: 1 });
-          const vp = page.getViewport({ scale: W / v1.width * (window.devicePixelRatio || 1) });
+          const vp = page.getViewport({ scale: w / v1.width * (window.devicePixelRatio || 1) });
           cv = document.createElement('canvas'); cv.width = Math.ceil(vp.width); cv.height = Math.ceil(vp.height);
           await page.render({ canvasContext: cv.getContext('2d'), viewport: vp }).promise;
           page.cleanup();
+          cv.dataset.w = w;
           thumbs.set(ck, cv);
+          if (thumbs.size > 120) thumbs.delete(thumbs.keys().next().value);
         }
+        if (w !== pw()) continue;
         let node = cv;
-        if (cv.isConnected) { node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.getContext('2d').drawImage(cv, 0, 0); }
+        if (cv.isConnected) { node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = w; node.getContext('2d').drawImage(cv, 0, 0); }
         t.textContent = ''; t.append(node);
       } catch (e) { t.textContent = 'Preview unavailable'; }
     }
-  }, { root: prevCol, rootMargin: '600px' });
+  }, { root: prevCol, rootMargin: '800px' });
 
   function renderPreview() {
     obs.disconnect();
+    const top = prevCol.scrollTop;
     prev.textContent = '';
     const L = layout();
     if (!L.length) { prev.append(el('p', { class: 'muted' }, 'The combined PDF preview appears here.')); return; }
@@ -299,11 +397,15 @@
       if (nt.length) prev.append(el('p', { class: 'sb-prev-note' }, nt.join(' · ')));
       if (!r.refs.length) prev.append(el('p', { class: 'muted sb-prev-empty' }, blocked(r.sec) ? 'No pages (marked).' : 'No pages yet.'));
       r.refs.forEach((p, j) => {
-        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i }, 'Loading…');
+        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i });
+        const cv = thumbs.get(p.f + '\u0000' + p.i + '\u0000' + pw());
+        if (cv) { const node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = cv.dataset.w; node.getContext('2d').drawImage(cv, 0, 0); t.append(node); }
+        else t.textContent = 'Loading…';
         prev.append(el('figure', { class: 'sb-fig' }, t, el('figcaption', {}, 'Page ' + (r.from + j) + ' · ' + p.f + ' p' + (p.i + 1))));
         obs.observe(t);
       });
     });
+    prevCol.scrollTop = top;
   }
 
   function changed(full) {
