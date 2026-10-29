@@ -1,0 +1,3 @@
+#!/bin/sh
+sh ./stamp.sh >/dev/null
+git add version.json index.html

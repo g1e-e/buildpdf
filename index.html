@@ -3,10 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; worker-src 'self' blob:; font-src 'self' blob: data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; worker-src 'self' blob:; font-src 'self' blob: data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
+<meta name="buildpdf-version" content="20261029140505">
 <title>buildpdf</title>
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20261029140505">
 </head>
 <body>
 <header>
@@ -21,6 +22,7 @@
     <input type="file" id="fmtFile" accept=".json,application/json" hidden>
     <button id="buildAll" class="primary">Build all</button>
     <button id="clearBoard" class="danger">Clear board</button>
+    <button id="refreshSite" title="Load the latest version of buildpdf">↻ Update<span id="updDot" class="upd-dot" hidden></span></button>
   </div>
 </header>
 <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
@@ -32,8 +34,8 @@
 <div id="status" class="status" hidden><span id="statusText"></span><button id="statusClose" class="icon" title="Dismiss">✕</button></div>
 <main id="board"></main>
 <div id="overlay" class="overlay" hidden><div class="overlay-box"><p id="overlayText">Building…</p><progress id="overlayBar" max="1" value="0"></progress></div></div>
-<script src="lib/pdf-lib.min.js"></script>
-<script src="lib/Sortable.min.js"></script>
-<script src="app.js"></script>
+<script src="lib/pdf-lib.min.js?v=20261029140505"></script>
+<script src="lib/Sortable.min.js?v=20261029140505"></script>
+<script src="app.js?v=20261029140505"></script>
 </body>
 </html>

@@ -79,3 +79,6 @@ button.small{font-size:12px;padding:5px 9px}
 .pk-size button{border:0;border-radius:0;padding:5px 9px}
 .pk-size button.on{background:#2f6fde;color:#fff}
 .pk-thumb .pk-check{width:30px;height:30px;font-size:16px}
+#refreshSite{position:relative}
+.upd-dot{position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:50%;background:#e5484d;border:2px solid #1f3b63}
+.upd-dot[hidden]{display:none}

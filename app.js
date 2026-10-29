@@ -1,5 +1,6 @@
 (() => {
   const KEY = 'buildpdf.board.v1';
+  const VERSION = (document.querySelector('meta[name="buildpdf-version"]') || {}).content || '0';
   const files = new Map();
   let board = { cols: [], sel: {} };
   let uid = 0;
@@ -275,7 +276,7 @@
   }
 
   let pdfjsP = null;
-  const pdfjs = () => pdfjsP || (pdfjsP = import('./lib/pdf.min.mjs').then(m => { m.GlobalWorkerOptions.workerSrc = new URL('lib/pdf.worker.min.mjs', location.href).href; return m; }));
+  const pdfjs = () => pdfjsP || (pdfjsP = import('./lib/pdf.min.mjs?v=' + VERSION).then(m => { m.GlobalWorkerOptions.workerSrc = new URL('lib/pdf.worker.min.mjs?v=' + VERSION, location.href).href; return m; }));
   let picker = null;
   const SIZES = { S: 200, M: 300, L: 400 };
   const SKEY = 'buildpdf.thumbSize';
@@ -605,6 +606,24 @@
     status('Imported ' + n + ' format' + (n === 1 ? '' : 's') + '.' + (skipped ? ' Skipped ' + skipped + '.' : ''));
   });
   loadFormats();
+
+  if (new URLSearchParams(location.search).has('r')) history.replaceState(null, '', location.pathname + location.hash);
+  $('#refreshSite').onclick = () => {
+    if (files.size && !confirm('Updating reloads the page. Your board, lists, formats and page selections are kept, but you will need to add your folders again. Continue?')) return;
+    location.replace(location.pathname + '?r=' + Date.now() + location.hash);
+  };
+  async function checkVersion() {
+    try {
+      const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store', credentials: 'omit' });
+      const v = (await r.json()).version;
+      const newer = !!v && v !== VERSION;
+      $('#updDot').hidden = !newer;
+      $('#refreshSite').title = newer ? 'A newer version is available. Click to update.' : 'Load the latest version of buildpdf';
+    } catch (e) {}
+  }
+  checkVersion();
+  setInterval(checkVersion, 5 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
 
   load();
   render();

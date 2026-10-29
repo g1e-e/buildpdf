@@ -11,3 +11,7 @@ Live: https://g1e-e.github.io/buildpdf/
 ## Privacy
 
 Everything runs in your browser. Files are never uploaded or sent anywhere: there is no server, no analytics, and the page's Content Security Policy blocks all network requests. Only the board layout (folder and file names) is saved in your browser's local storage, never file contents. Libraries (pdf-lib, SortableJS) are bundled in `lib/`.
+
+## Versioning
+
+`stamp.sh` writes a new version to `version.json` and to the `?v=` asset URLs and version meta tag in `index.html`. The tracked pre-commit hook in `.githooks` runs it on every commit once you run `git config core.hooksPath .githooks` in your clone.
