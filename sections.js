@@ -583,11 +583,41 @@
     return { set onClose(fn) { onClosed = fn; } };
   }
 
-  function flatten(cp, ops) {
-    const { rgb } = PDFLib;
+  function pageMap(cp) {
     const r = ((cp.getRotation().angle % 360) + 360) % 360;
     const cb = cp.getCropBox(), x0 = cb.x, y0 = cb.y, w = cb.width, h = cb.height;
-    const map = (X, Y) => ({ 0: [x0 + X, y0 + h - Y], 90: [x0 + Y, y0 + X], 180: [x0 + w - X, y0 + Y], 270: [x0 + w - Y, y0 + h - X] }[r] || [x0 + X, y0 + h - Y]);
+    return (X, Y) => ({ 0: [x0 + X, y0 + h - Y], 90: [x0 + Y, y0 + X], 180: [x0 + w - X, y0 + Y], 270: [x0 + w - Y, y0 + h - X] }[r] || [x0 + X, y0 + h - Y]);
+  }
+  const cenRects = (cp, ops) => { const map = pageMap(cp); return ops.filter(o => o.k === 'cen').map(o => { const [ax, ay] = map(o.x, o.y), [bx, by] = map(o.x + o.w, o.y + o.h); return [Math.min(ax, bx), Math.min(ay, by), Math.max(ax, bx), Math.max(ay, by)]; }); };
+  async function renderCensored(f, i, ann) {
+    const page = await (await getDoc(f)).getPage(i + 1);
+    const v1 = page.getViewport({ scale: 1 }), vp = page.getViewport({ scale: RASTER_DPI / 72 });
+    const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    page.cleanup();
+    ctx.setTransform(c.width / v1.width, 0, 0, c.height / v1.height, 0, 0); drawBoxes(ctx, ann.filter(o => o.k === 'cen'));
+    return { c, vp };
+  }
+  async function rasterRegion(out, cache, f, i, ann, bb) {
+    if (!cache.r) cache.r = await renderCensored(f, i, ann);
+    const { c, vp } = cache.r;
+    const pts = [vp.convertToViewportPoint(bb[0], bb[1]), vp.convertToViewportPoint(bb[2], bb[3])];
+    const x0 = Math.max(0, Math.floor(Math.min(pts[0][0], pts[1][0]))), y0 = Math.max(0, Math.floor(Math.min(pts[0][1], pts[1][1])));
+    const x1 = Math.min(c.width, Math.ceil(Math.max(pts[0][0], pts[1][0]))), y1 = Math.min(c.height, Math.ceil(Math.max(pts[0][1], pts[1][1])));
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    const r = ((vp.rotation % 360) + 360) % 360, sw = x1 - x0, sh = y1 - y0;
+    const d = document.createElement('canvas'), q = r % 180 ? [sh, sw] : [sw, sh];
+    d.width = q[0]; d.height = q[1];
+    const dx = d.getContext('2d');
+    dx.translate(d.width / 2, d.height / 2); dx.rotate(-r * Math.PI / 180); dx.drawImage(c, x0, y0, sw, sh, -sw / 2, -sh / 2, sw, sh);
+    const blob = await new Promise(res => d.toBlob(res, 'image/jpeg', 0.92));
+    return (await out.embedJpg(await blob.arrayBuffer())).ref;
+  }
+  function flatten(cp, ops) {
+    const { rgb } = PDFLib;
+    const map = pageMap(cp);
     ops.forEach(o => {
       const b = BOX[o.k]; if (!b) return;
       const [ax, ay] = map(o.x, o.y), [bx, by] = map(o.x + o.w, o.y + o.h);
@@ -596,6 +626,226 @@
     });
   }
 
+  const RD = (() => {
+    const WS = new Set([0, 9, 10, 12, 13, 32]), DL = new Set([40, 41, 60, 62, 91, 93, 123, 125, 47, 37]);
+    const fail = r => { const e = new Error(r); e.fallback = r; throw e; };
+    function lex(b) {
+      let p = 0;
+      const ws = () => { for (;;) { while (p < b.length && WS.has(b[p])) p++; if (b[p] === 37) { while (p < b.length && b[p] !== 10 && b[p] !== 13) p++; } else return; } };
+      function str() {
+        const o = []; let d = 1; p++;
+        while (p < b.length) {
+          let c = b[p++];
+          if (c === 92) {
+            c = b[p++];
+            const m = { 110: 10, 114: 13, 116: 9, 98: 8, 102: 12 }[c];
+            if (m != null) o.push(m);
+            else if (c >= 48 && c <= 55) { let v = c - 48; for (let k = 0; k < 2 && b[p] >= 48 && b[p] <= 55; k++) v = v * 8 + b[p++] - 48; o.push(v & 255); }
+            else if (c === 13) { if (b[p] === 10) p++; }
+            else if (c !== 10) o.push(c);
+          } else if (c === 40) { d++; o.push(c); }
+          else if (c === 41) { if (!--d) break; o.push(c); }
+          else o.push(c);
+        }
+        return { t: 's', v: Uint8Array.from(o) };
+      }
+      function hex() {
+        p++; let h = '';
+        while (p < b.length && b[p] !== 62) { const c = b[p++]; if (!WS.has(c)) h += String.fromCharCode(c); }
+        p++; if (h.length % 2) h += '0';
+        const o = new Uint8Array(h.length / 2); for (let k = 0; k < o.length; k++) o[k] = parseInt(h.substr(k * 2, 2), 16);
+        return { t: 's', v: o };
+      }
+      function word() { const s = p; while (p < b.length && !WS.has(b[p]) && !DL.has(b[p])) p++; return String.fromCharCode(...b.subarray(s, p)); }
+      function obj() {
+        ws(); if (p >= b.length) return null;
+        const c = b[p];
+        if (c === 40) return str();
+        if (c === 60) { if (b[p + 1] === 60) { p += 2; const v = []; for (;;) { ws(); if (b[p] === 62 && b[p + 1] === 62) { p += 2; break; } if (p >= b.length) break; v.push(obj()); } return { t: 'd', v }; } return hex(); }
+        if (c === 91) { p++; const v = []; for (;;) { ws(); if (b[p] === 93) { p++; break; } if (p >= b.length) break; v.push(obj()); } return { t: 'a', v }; }
+        if (c === 47) { p++; return { t: 'n', v: word() }; }
+        if (c === 41 || c === 62 || c === 93 || c === 123 || c === 125) { p++; return { t: 'k', v: String.fromCharCode(c) }; }
+        const w = word();
+        if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(w)) return { t: 'i', v: parseFloat(w) };
+        if (w === 'true' || w === 'false' || w === 'null') return { t: 'b', v: w };
+        if (!w) { p++; return { t: 'k', v: '?' }; }
+        return { t: 'o', v: w };
+      }
+      const ops = []; let args = [], start = -1;
+      for (;;) {
+        ws(); if (p >= b.length) break;
+        const s0 = p, x = obj(); if (!x) break;
+        if (start < 0) start = s0;
+        if (x.t !== 'o') { args.push(x); continue; }
+        if (x.v === 'BI') {
+          const kv = [];
+          for (;;) { ws(); const s1 = p, y = obj(); if (!y) break; if (y.t === 'o' && y.v === 'ID') { p = s1 + 2; break; } kv.push(y); }
+          p++;
+          while (p < b.length && !(WS.has(b[p - 1]) && b[p] === 69 && b[p + 1] === 73 && (p + 2 >= b.length || WS.has(b[p + 2])))) p++;
+          p += 2;
+          ops.push({ op: 'BI', args: kv, start, end: p });
+        } else ops.push({ op: x.v, args, start, end: p });
+        args = []; start = -1;
+      }
+      return ops;
+    }
+    const mul = (m, n) => [m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3], m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3], m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5]];
+    const inv = m => { const d = m[0] * m[3] - m[1] * m[2]; if (!d) fail('singular matrix'); return [m[3] / d, -m[1] / d, -m[2] / d, m[0] / d, (m[2] * m[5] - m[3] * m[4]) / d, (m[1] * m[4] - m[0] * m[5]) / d]; };
+    const tp = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+    const quadBox = (m, x0, y0, x1, y1) => { const q = [tp(m, x0, y0), tp(m, x1, y0), tp(m, x0, y1), tp(m, x1, y1)]; const xs = q.map(v => v[0]), ys = q.map(v => v[1]); return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]; };
+    const overlap = (g, R, frac) => R.some(r => { const ox = Math.min(g[2], r[2]) - Math.max(g[0], r[0]), oy = Math.min(g[3], r[3]) - Math.max(g[1], r[1]); return ox > (g[2] - g[0]) * frac && oy > (g[3] - g[1]) * frac && ox > 0 && oy > 0; });
+    const fmt = n => { const s = (Math.round(n * 10000) / 10000).toString(); return s === '-0' ? '0' : s; };
+    const hexs = a => '<' + Array.from(a, x => x.toString(16).padStart(2, '0')).join('') + '>';
+    let winNames = null;
+    const encNames = emb => { const m = {}; Object.values(emb.encoding.unicodeMappings).forEach(([c, n]) => { if (m[c] == null) m[c] = n; }); return m; };
+    const N = PDFLib.PDFName.of;
+    const nm = v => v ? String(v).replace(/^\//, '') : '';
+    const num = v => v && v.asNumber ? v.asNumber() : (typeof v === 'number' ? v : NaN);
+    const arr = v => v && v.asArray ? v.asArray() : [];
+    function fontInfo(fd, ctx) {
+      const L = k => fd.lookup(N(k));
+      const sub = nm(L('Subtype'));
+      if (sub === 'Type3') fail('Type3 font');
+      if (sub === 'Type0') {
+        if (nm(L('Encoding')) !== 'Identity-H') fail('CID font with ' + (nm(L('Encoding')) || 'custom') + ' encoding');
+        const df = ctx.lookup(arr(L('DescendantFonts'))[0]);
+        if (!df) fail('CID font without descendant');
+        const dw = num(df.lookup(N('DW'))), W = arr(df.lookup(N('W'))).map(v => ctx.lookup(v)), map = new Map();
+        for (let k = 0; k < W.length;) {
+          const a = num(W[k]), b = W[k + 1];
+          if (b && b.asArray) { arr(b).forEach((w, j) => map.set(a + j, num(ctx.lookup(w)))); k += 2; }
+          else { const last = num(b), w = num(W[k + 2]); for (let c = a; c <= last; c++) map.set(c, w); k += 3; }
+        }
+        return { n: 2, w: c => map.has(c) ? map.get(c) : (isNaN(dw) ? 1000 : dw) };
+      }
+      const widths = L('Widths');
+      if (widths) {
+        const fc = num(L('FirstChar')) || 0, ws = arr(widths).map(v => num(ctx.lookup(v)));
+        const fdesc = L('FontDescriptor'), mw = fdesc ? num(fdesc.lookup(N('MissingWidth'))) : NaN;
+        return { n: 1, w: c => { const v = ws[c - fc]; return v == null || isNaN(v) ? (isNaN(mw) ? 0 : mw) : v; } };
+      }
+      const base = nm(L('BaseFont')).replace(/^[A-Z]{6}\+/, '');
+      const std = Object.values(PDFLib.StandardFonts);
+      if (!std.includes(base)) fail('font ' + base + ' has no widths');
+      const emb = PDFLib.StandardFontEmbedder.for(base);
+      const names = Object.assign({}, base === 'Symbol' || base === 'ZapfDingbats' ? encNames(emb) : (winNames = winNames || encNames(PDFLib.StandardFontEmbedder.for('Helvetica'))));
+      const enc = L('Encoding');
+      if (enc && enc.lookup) { let c = 0; arr(enc.lookup(N('Differences'))).forEach(v => { v = ctx.lookup(v); if (v && v.asNumber) c = v.asNumber(); else { names[c++] = nm(v); } }); }
+      return { n: 1, w: c => names[c] ? emb.font.getWidthOfGlyph(names[c]) || 0 : 0 };
+    }
+    function readContents(page) {
+      const c = page.node.Contents(); if (!c) return new Uint8Array();
+      const list = c.asArray ? c.asArray().map(r => page.doc.context.lookup(r)) : [c];
+      const parts = list.map(s => s instanceof PDFLib.PDFRawStream ? PDFLib.decodePDFRawStream(s).decode() : s.getContents());
+      const out = new Uint8Array(parts.reduce((a, x) => a + x.length + 1, 0)); let o = 0;
+      parts.forEach(x => { out.set(x, o); o += x.length; out[o++] = 10; });
+      return out;
+    }
+    function run(page, R) {
+      const ctx = page.doc.context, res = page.node.Resources();
+      const fontsD = res && res.lookup(N('Font')), xoD = res && res.lookup(N('XObject'));
+      const fonts = new Map();
+      const getFont = n => { if (!fonts.has(n)) { const fd = fontsD && fontsD.lookup(N(n)); if (!fd) fail('missing font ' + n); fonts.set(n, fontInfo(fd, ctx)); } return fonts.get(n); };
+      const bytes = readContents(page), ops = lex(bytes);
+      let g = { ctm: [1, 0, 0, 1, 0, 0], tc: 0, tw: 0, th: 1, tl: 0, f: null, fs: 0, ts: 0 }, st = [], tm = [1, 0, 0, 1, 0, 0], tlm = tm;
+      const edits = [], images = []; let removed = 0;
+      const nv = a => a.map(x => x.v);
+      function show(items) {
+        const f = g.f ? getFont(g.f) : fail('text without font');
+        let any = false; const outItems = [];
+        for (const it of items) {
+          if (it.t === 'i') { tm = mul([1, 0, 0, 1, -it.v / 1000 * g.fs * g.th, 0], tm); outItems.push(fmt(it.v)); continue; }
+          if (it.t !== 's') continue;
+          const b = it.v; let run2 = [];
+          for (let k = 0; k + f.n <= b.length; k += f.n) {
+            const code = f.n === 2 ? b[k] << 8 | b[k + 1] : b[k], w0 = f.w(code);
+            const sp = f.n === 1 && code === 32 ? g.tw : 0;
+            const trm = mul([g.fs * g.th, 0, 0, g.fs, 0, g.ts], mul(tm, g.ctm));
+            const gb = quadBox(trm, 0, -0.22, Math.max(w0, 250) / 1000, 0.88);
+            const adv = (w0 / 1000 * g.fs + g.tc + sp) * g.th;
+            if (overlap(gb, R, 0.2)) {
+              any = true; removed++;
+              if (run2.length) { outItems.push(hexs(run2)); run2 = []; }
+              if (!g.fs) fail('zero font size');
+              outItems.push(fmt(-(w0 + (g.tc + sp) * 1000 / g.fs)));
+            } else for (let j = 0; j < f.n; j++) run2.push(b[k + j]);
+            tm = mul([1, 0, 0, 1, adv, 0], tm);
+          }
+          if (run2.length) outItems.push(hexs(run2));
+        }
+        return any ? '[' + outItems.join(' ') + '] TJ' : null;
+      }
+      const tstar = () => { tlm = mul([1, 0, 0, 1, 0, -g.tl], tlm); tm = tlm; };
+      for (const o of ops) {
+        const a = o.args, v = nv(a);
+        switch (o.op) {
+          case 'q': st.push(Object.assign({}, g)); break;
+          case 'Q': if (st.length) g = st.pop(); break;
+          case 'cm': g.ctm = mul(v, g.ctm); break;
+          case 'BT': tm = tlm = [1, 0, 0, 1, 0, 0]; break;
+          case 'Tc': g.tc = v[0]; break;
+          case 'Tw': g.tw = v[0]; break;
+          case 'Tz': g.th = v[0] / 100; break;
+          case 'TL': g.tl = v[0]; break;
+          case 'Ts': g.ts = v[0]; break;
+          case 'Tf': g.f = v[0]; g.fs = v[1]; break;
+          case 'Td': tlm = mul([1, 0, 0, 1, v[0], v[1]], tlm); tm = tlm; break;
+          case 'TD': g.tl = -v[1]; tlm = mul([1, 0, 0, 1, v[0], v[1]], tlm); tm = tlm; break;
+          case 'Tm': tm = tlm = v.slice(0, 6); break;
+          case 'T*': tstar(); break;
+          case 'Tj': { const r = show([a[0]]); if (r) edits.push([o, r]); break; }
+          case 'TJ': { const r = show(a[0] ? a[0].v : []); if (r) edits.push([o, r]); break; }
+          case "'": { tstar(); const r = show([a[0]]); if (r) edits.push([o, 'T* ' + r]); break; }
+          case '"': { g.tw = v[0]; g.tc = v[1]; tstar(); const r = show([a[2]]); if (r) edits.push([o, fmt(v[0]) + ' Tw ' + fmt(v[1]) + ' Tc T* ' + r]); break; }
+          case 'BI': if (overlap(quadBox(g.ctm, 0, 0, 1, 1), R, 0)) fail('inline image under a censor'); break;
+          case 'Do': {
+            const x = xoD && xoD.lookup(N(v[0])); if (!x) break;
+            const sub = nm(x.dict.lookup(N('Subtype')));
+            if (sub === 'Image') { const bb = quadBox(g.ctm, 0, 0, 1, 1); if (overlap(bb, R, 0)) images.push({ o, ctm: g.ctm.slice(), bb }); }
+            else if (sub === 'Form') {
+              const m = arr(x.dict.lookup(N('Matrix'))).map(num), bx = arr(x.dict.lookup(N('BBox'))).map(num);
+              const M = m.length === 6 ? mul(m, g.ctm) : g.ctm;
+              if (bx.length !== 4 || overlap(quadBox(M, bx[0], bx[1], bx[2], bx[3]), R, 0)) fail('form XObject under a censor');
+            }
+            break;
+          }
+        }
+      }
+      return { bytes, edits, images, removed };
+    }
+    async function redact(out, page, R, rasterImg) {
+      const { bytes, edits, images, removed } = run(page, R);
+      const reps = edits.map(([o, s]) => [o.start, o.end, s]);
+      let n = 0;
+      if (images.length) {
+        const res = page.node.Resources();
+        let xo = res.lookup(N('XObject'));
+        for (const im of images) {
+          const ref = await rasterImg(im.bb);
+          if (!ref) fail('image could not be redacted');
+          const name = 'BpdfRedact' + (n++);
+          xo.set(N(name), ref);
+          const [x0, y0, x1, y1] = im.bb;
+          reps.push([im.o.start, im.o.end, 'q ' + inv(im.ctm).map(fmt).join(' ') + ' cm ' + [x1 - x0, 0, 0, y1 - y0, x0, y0].map(fmt).join(' ') + ' cm /' + name + ' Do Q']);
+        }
+      }
+      reps.sort((a, b) => a[0] - b[0]);
+      const enc = new TextEncoder(), chunks = [enc.encode('q\n')]; let p = 0;
+      reps.forEach(([s, e, t]) => { chunks.push(bytes.subarray(p, s), enc.encode(t)); p = e; });
+      chunks.push(bytes.subarray(p), enc.encode('\nQ\n'));
+      const all = new Uint8Array(chunks.reduce((a, c) => a + c.length, 0)); let o = 0;
+      chunks.forEach(c => { all.set(c, o); o += c.length; });
+      page.node.set(N('Contents'), out.context.register(out.context.flateStream(all)));
+      const annots = page.node.Annots && page.node.Annots();
+      let dropped = 0;
+      if (annots) {
+        const keep = annots.asArray().filter(r => { const a = out.context.lookup(r), rc = a && a.lookup && arr(a.lookup(N('Rect'))).map(num); const hit = rc && rc.length === 4 && overlap([Math.min(rc[0], rc[2]), Math.min(rc[1], rc[3]), Math.max(rc[0], rc[2]), Math.max(rc[1], rc[3])], R, 0); if (hit) dropped++; return !hit; });
+        page.node.set(N('Annots'), out.context.obj(keep));
+      }
+      return { removed, images: images.length, dropped };
+    }
+    return { redact };
+  })();
   const RASTER_DPI = 250;
   async function rasterPage(out, f, i, ann) {
     const page = await (await getDoc(f)).getPage(i + 1);
@@ -646,7 +896,7 @@
           y -= 6;
         });
       }
-      const firstPage = new Map();
+      const firstPage = new Map(), redacted = [], rastered = [];
       let done = 0;
       for (const r of L) {
         for (const p of r.refs) {
@@ -658,8 +908,20 @@
             if (p.i >= src.getPageCount()) throw new Error('range');
             const ann = p.it && p.it.ann && p.it.ann[p.i];
             let cp;
-            if (ann && ann.some(o => o.k === 'cen')) cp = await rasterPage(out, p.f, p.i, ann);
-            else { [cp] = await out.copyPages(src, [p.i]); out.addPage(cp); if (ann && ann.length) flatten(cp, ann); }
+            if (ann && ann.some(o => o.k === 'cen')) {
+              [cp] = await out.copyPages(src, [p.i]); out.addPage(cp);
+              const where = p.f + ' p' + (p.i + 1);
+              try {
+                const cache = {};
+                const info = await RD.redact(out, cp, cenRects(cp, ann), bb => rasterRegion(out, cache, p.f, p.i, ann, bb));
+                flatten(cp, ann);
+                redacted.push(where + ' (' + info.removed + ' characters removed' + (info.images ? ', ' + info.images + ' image' + (info.images === 1 ? '' : 's') + ' blacked out' : '') + ')');
+              } catch (e) {
+                out.removePage(out.getPageCount() - 1);
+                cp = await rasterPage(out, p.f, p.i, ann);
+                rastered.push(where + ' (' + (e.fallback || 'could not read the page') + ')');
+              }
+            } else { [cp] = await out.copyPages(src, [p.i]); out.addPage(cp); if (ann && ann.length) flatten(cp, ann); }
             if (!firstPage.has(r.sec.id)) firstPage.set(r.sec.id, cp);
           } catch (e) { problems.push(p.f + ' p' + (p.i + 1)); }
         }
@@ -690,7 +952,7 @@
       const a = el('a', { href: url, download: name });
       document.body.append(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 60000);
-      status('"' + name + '": ' + out.getPageCount() + ' pages.' + (problems.length ? ' Skipped: ' + problems.join(', ') : ''));
+      status('"' + name + '": ' + out.getPageCount() + ' pages.' + (redacted.length ? ' Censored text removed on ' + redacted.join(', ') + '.' : '') + (rastered.length ? ' Turned into images to censor safely: ' + rastered.join(', ') + '.' : '') + (problems.length ? ' Skipped: ' + problems.join(', ') : ''));
     } finally { ov.hidden = true; }
   }
 
