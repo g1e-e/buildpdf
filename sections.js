@@ -7,6 +7,7 @@
   const files = new Map();
   const docs = new Map();
   const thumbs = new Map();
+  const BOX = { hl: { c: '#ffe14d', o: 0.35, n: 'Highlight' }, cen: { c: '#000000', o: 1, n: 'Censor' } };
   let uid = 0;
   const id = () => 's' + Date.now().toString(36) + (uid++).toString(36);
 
@@ -68,6 +69,14 @@
       (s.pages || []).forEach(p => { const last = s.items[s.items.length - 1]; if (last && last.f === p.f) last.pages.push(p.i); else s.items.push({ id: id(), f: p.f, pages: [p.i] }); });
     }
     delete s.pages;
+    s.items.forEach(it => {
+      if (!it.ann) return;
+      for (const [pg, list] of Object.entries(it.ann)) {
+        const boxes = (Array.isArray(list) ? list : []).map(o => o && o.t === 'box' && BOX[o.k] ? o : o && (o.t === 'hl' || o.t === 'wo') && o.w > 0 && o.h > 0 ? { t: 'box', k: o.t === 'hl' ? 'hl' : 'cen', x: o.x, y: o.y, w: o.w, h: o.h } : null).filter(Boolean);
+        if (boxes.length) it.ann[pg] = boxes; else delete it.ann[pg];
+      }
+      if (!Object.keys(it.ann).length) delete it.ann;
+    });
   });
   const flat = sec => sec.items.flatMap(it => it.pages.map(i => ({ f: it.f, i, it })));
   const fmtRanges = arr => { const out = []; for (let k = 0; k < arr.length; k++) { let j = k; while (j + 1 < arr.length && arr[j + 1] === arr[j] + 1) j++; out.push(j > k ? (arr[k] + 1) + '-' + (arr[j] + 1) : String(arr[k] + 1)); k = j; } return out.join(', '); };
@@ -263,7 +272,7 @@
         list.append(el('li', { class: 'sb-item' + (loaded ? '' : ' missing') + (it.pages.length ? '' : ' empty'), 'data-id': it.id },
           el('div', { class: 'sb-item-row' },
             el('button', { class: 'sb-item-name', title: loaded ? 'Choose pages' : 'Add this file again to use it', onclick: () => openItem(sec, it) }, '📄 ' + it.f), cnt,
-            ne ? el('button', { class: 'sb-edits', title: 'Remove all edits on this file in this section', onclick: () => { if (confirm('Remove ' + ne + ' edit' + (ne === 1 ? '' : 's') + ' on ' + it.f + ' in "' + sec.title + '"?')) { delete it.ann; changed(true); } } }, '✎ ' + ne + ' ✕') : null,
+            ne ? el('button', { class: 'sb-edits', title: 'Remove all boxes on this file in this section', onclick: () => { if (confirm('Remove ' + ne + ' box' + (ne === 1 ? '' : 'es') + ' on ' + it.f + ' in "' + sec.title + '"?')) { delete it.ann; changed(true); } } }, '▭ ' + ne + ' ✕') : null,
             el('button', { class: 'icon', title: 'Remove from section', onclick: () => { sec.items.splice(sec.items.indexOf(it), 1); changed(true); } }, '✕')),
           rng, hint));
       });
@@ -425,179 +434,67 @@
   const winAnsi = s => String(s).replace(/[\u2013\u2014]/g, '-').replace(/[\u2018\u2019]/g, "'").replace(/[\u201C\u201D]/g, '"').replace(/[^\x20-\x7E\u00A0-\u00FF]/g, '?');
   const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 
-  const wrapText = (text, maxW, measure) => {
-    const out = [];
-    String(text).split('\n').forEach(par => {
-      let line = '';
-      par.split(/(\s+)/).forEach(tok => {
-        if (!tok) return;
-        const tryL = line + tok;
-        if (measure(tryL) <= maxW || !line) {
-          if (measure(tryL) > maxW && !line.trim()) {
-            let chunk = '';
-            for (const ch of tok) { if (measure(chunk + ch) > maxW && chunk) { out.push(chunk); chunk = ''; } chunk += ch; }
-            line = chunk;
-          } else line = tryL;
-        } else { out.push(line.replace(/\s+$/, '')); line = tok.trim() ? tok : ''; }
-      });
-      out.push(line.replace(/\s+$/, ''));
-    });
-    return out;
-  };
-  const IMGS = new Map();
-  const idb = () => new Promise((res, rej) => { const q = indexedDB.open('buildpdf', 1); q.onupgradeneeded = () => q.result.createObjectStore('images'); q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
-  const idbDo = (mode, fn) => idb().then(db => new Promise((res, rej) => { const tx = db.transaction('images', mode); const r = fn(tx.objectStore('images')); tx.oncomplete = () => res(r && r.result); tx.onerror = () => rej(tx.error); }));
-  const imgType = b => b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47 ? 'png' : b[0] === 0xFF && b[1] === 0xD8 ? 'jpg' : null;
-  async function makeImg(bytes, type) {
-    const im = new Image(); im.src = URL.createObjectURL(new Blob([bytes], { type: type === 'png' ? 'image/png' : 'image/jpeg' }));
-    await im.decode(); return { el: im, bytes, type };
+  function drawBoxes(ctx, ops) {
+    ops.forEach(o => { const b = BOX[o.k]; if (!b) return; ctx.save(); ctx.globalAlpha = b.o; ctx.fillStyle = b.c; ctx.fillRect(o.x, o.y, o.w, o.h); ctx.restore(); });
   }
-  function loadImg(key) {
-    if (!IMGS.has(key)) { const p = idbDo('readonly', st => st.get(key)).then(v => v ? makeImg(new Uint8Array(v.bytes), v.type) : null).catch(() => null).then(v => { p.done = v; return v; }); IMGS.set(key, p); }
-    return IMGS.get(key);
-  }
-  const ensureImgs = ops => Promise.all(ops.filter(o => o.t === 'img').map(o => loadImg(o.ref)));
-  const isInk = o => o.t === 'hl' || o.t === 'hb' || o.t === 'pen' || o.t === 'er';
-  const isObj = o => o.t === 'wo' || o.t === 'img' || o.t === 'shape';
-  const arrowHead = o => { const ex = o.x + o.w, ey = o.y + o.h, a = Math.atan2(o.h, o.w), L = Math.max(10, o.lw * 4); return [[ex - L * Math.cos(a - 0.45), ey - L * Math.sin(a - 0.45)], [ex, ey], [ex - L * Math.cos(a + 0.45), ey - L * Math.sin(a + 0.45)]]; };
-  function strokePath(ctx, p) { ctx.beginPath(); p.forEach(([x, y], k) => k ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); if (p.length === 1) ctx.lineTo(p[0][0] + 0.01, p[0][1]); ctx.stroke(); }
-  function drawObjs(ctx, ops) {
-    ops.forEach(o => {
-      if (!isObj(o)) return;
-      ctx.save();
-      if (o.t === 'wo') { ctx.fillStyle = '#fff'; ctx.fillRect(o.x, o.y, o.w, o.h); }
-      else if (o.t === 'img') {
-        const p = IMGS.get(o.ref), im = p && p.done;
-        if (im) ctx.drawImage(im.el, o.x, o.y, o.w, o.h);
-        else { ctx.strokeStyle = '#9aa5b8'; ctx.setLineDash([4, 3]); ctx.strokeRect(o.x, o.y, o.w, o.h); }
-      } else {
-        ctx.strokeStyle = o.c; ctx.lineWidth = o.lw; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
-        if (o.k === 'rect') { if (o.fill) { ctx.fillStyle = o.fill; ctx.fillRect(o.x, o.y, o.w, o.h); } if (o.lw) ctx.strokeRect(o.x, o.y, o.w, o.h); }
-        else if (o.k === 'ell') { ctx.beginPath(); ctx.ellipse(o.x + o.w / 2, o.y + o.h / 2, Math.abs(o.w / 2), Math.abs(o.h / 2), 0, 0, Math.PI * 2); if (o.fill) { ctx.fillStyle = o.fill; ctx.fill(); } if (o.lw) ctx.stroke(); }
-        else { strokePath(ctx, [[o.x, o.y], [o.x + o.w, o.y + o.h]]); if (o.k === 'arrow') strokePath(ctx, arrowHead(o)); }
-      }
-      ctx.restore();
-    });
-  }
-  function drawInk(ctx, ops) {
-    ops.forEach(o => {
-      if (!isInk(o)) return;
-      const a = o.t === 'er' ? 1 : (o.o == null ? 1 : o.o);
-      if (o.t === 'hl') { ctx.save(); ctx.globalAlpha = a; ctx.fillStyle = o.c; ctx.fillRect(o.x, o.y, o.w, o.h); ctx.restore(); return; }
-      const group = a < 1;
-      let c = ctx;
-      if (group) { const tmp = document.createElement('canvas'); tmp.width = ctx.canvas.width; tmp.height = ctx.canvas.height; c = tmp.getContext('2d'); c.setTransform(ctx.getTransform()); }
-      c.save();
-      c.globalCompositeOperation = o.t === 'er' ? 'destination-out' : 'source-over';
-      c.strokeStyle = o.t === 'er' ? '#000' : o.c; c.lineWidth = o.w; c.lineCap = 'round'; c.lineJoin = 'round';
-      strokePath(c, o.p);
-      c.restore();
-      if (group) { ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = a; ctx.drawImage(c.canvas, 0, 0); ctx.restore(); }
-    });
-  }
-  const FONT = 'Helvetica, Arial, sans-serif';
-  function drawTexts(ctx, ops) {
-    ops.forEach(o => {
-      if (o.t !== 'text' || !o.text) return;
-      ctx.save(); ctx.font = o.size + 'px ' + FONT; ctx.fillStyle = o.c; ctx.textBaseline = 'alphabetic';
-      wrapText(o.text, o.w, s => ctx.measureText(s).width).forEach((ln, k) => ctx.fillText(ln, o.x, o.y + o.size * (0.9 + 1.2 * k)));
-      ctx.restore();
-    });
-  }
-  function inkLayer(w, h, T, ops) { const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d'); x.setTransform(...T); drawInk(x, ops); return c; }
-  async function paintAnnInto(box, ops, W, dw, dh) {
+  function paintAnnInto(box, ops, W, dw, dh) {
     box.querySelectorAll(':scope > .sb-ann').forEach(c => c.remove());
     if (!ops || !ops.length || !dw) return;
-    await ensureImgs(ops);
     const dpr = window.devicePixelRatio || 1, k = W / dw * dpr;
     const cv = el('canvas', { class: 'sb-ann' });
     cv.width = Math.ceil(W * dpr); cv.height = Math.ceil(W * dh / dw * dpr);
-    const ctx = cv.getContext('2d');
-    ctx.setTransform(k, 0, 0, k, 0, 0); drawObjs(ctx, ops);
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(inkLayer(cv.width, cv.height, [k, 0, 0, k, 0, 0], ops), 0, 0);
-    ctx.setTransform(k, 0, 0, k, 0, 0); drawTexts(ctx, ops);
-    box.querySelectorAll(':scope > .sb-ann').forEach(c => c.remove());
+    const ctx = cv.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawBoxes(ctx, ops);
     box.append(cv);
   }
   const paintAnn = (t, it, i, dw, dh) => paintAnnInto(t, it && it.ann && it.ann[i], pw(), dw, dh);
   const annCount = it => Object.values(it.ann || {}).reduce((a, l) => a + l.length, 0);
 
-  const HL = [['Yellow', '#ffe14d'], ['Green', '#5ee27a'], ['Pink', '#ff6fb5'], ['Blue', '#5cc8ff']];
   const EKEY = 'buildpdf.editor';
-  const SHAPES = { rect: 'Rectangle', ell: 'Ellipse', line: 'Line', arrow: 'Arrow' };
   async function openEditor(sec, it, i) {
     const f = files.get(it.f);
     if (!f) { status(it.f + ' is not loaded. Add it again first.'); return; }
-    const pref = Object.assign({ tool: 'text', hl: HL[0][1], ho: 0.4, hs: 16, pc: '#d92d20', pw: 3, es: 18, ts: 14, tc: '#111111', sc: '#d92d20', sw: 2, sf: false, sfc: '#ffe14d', z: 1 }, JSON.parse(localStorage.getItem(EKEY) || '{}'));
-    const savePref = () => localStorage.setItem(EKEY, JSON.stringify(pref));
+    const pref = Object.assign({ append: true, k: 'hl', z: 1 }, JSON.parse(localStorage.getItem(EKEY) || '{}'));
+    if (!BOX[pref.k]) pref.k = 'hl';
+    const savePref = () => localStorage.setItem(EKEY, JSON.stringify({ append: pref.append, k: pref.k, z: pref.z }));
     let ops = JSON.parse(JSON.stringify((it.ann && it.ann[i]) || []));
-    let sel = -1, hist = [], fut = [], dw = 612, dh = 792, page = null, bgTimer = null;
+    let sel = -1, hist = [], fut = [], dw = 612, dh = 792, page = null, bgTimer = null, onClosed = null;
     const s = () => pref.z * 1.5;
     const snap = () => { hist.push(JSON.stringify(ops)); if (hist.length > 200) hist.shift(); fut = []; };
-    const store = () => { it.ann = it.ann || {}; if (ops.length) it.ann[i] = JSON.parse(JSON.stringify(ops)); else delete it.ann[i]; save(); ub.disabled = !hist.length; rb.disabled = !fut.length; };
-    const bg = el('canvas', { class: 'ed-bg' }), objc = el('canvas', { class: 'ed-objc' }), ink = el('canvas', { class: 'ed-ink' }), objs = el('div', { class: 'ed-objs' });
-    const ring = el('div', { class: 'ed-ring', hidden: '' });
-    const sheet = el('div', { class: 'ed-page' }, bg, objc, ink, objs, ring);
+    const store = () => { it.ann = it.ann || {}; if (ops.length) it.ann[i] = JSON.parse(JSON.stringify(ops)); else delete it.ann[i]; save(); };
+    const bg = el('canvas', { class: 'ed-bg' }), lay = el('canvas', { class: 'ed-boxes' }), objs = el('div', { class: 'ed-objs' });
+    const sheet = el('div', { class: 'ed-page' }, bg, lay, objs);
     const stage = el('div', { class: 'ed-stage' }, sheet);
-    const toolBtn = (k, label, tip) => el('button', { class: 'ed-tool', 'data-tool': k, title: tip, onclick: () => setTool(k) }, label);
-    const num = (v, mn, mx, st, on, lab) => { const n = el('input', { type: 'number', min: mn, max: mx, step: st, value: v, class: 'ed-num', 'aria-label': lab, title: lab }); n.addEventListener('input', () => { const x = +n.value; if (x >= mn && x <= mx) on(x); }); return n; };
-    const rng = (v, mn, mx, st, on, lab) => { const n = el('input', { type: 'range', min: mn, max: mx, step: st, value: v, 'aria-label': lab, title: lab }); n.addEventListener('input', () => on(+n.value)); return n; };
-    const color = (v, on, lab) => { const n = el('input', { type: 'color', value: v, 'aria-label': lab, title: lab }); n.addEventListener('input', () => on(n.value)); return n; };
-    const cur = t => ops[sel] && (Array.isArray(t) ? t.includes(ops[sel].t) : ops[sel].t === t) ? ops[sel] : null;
-    let liveSnap = null;
-    const applySel = (o, k, v) => { if (!o) return; if (liveSnap !== o) { snap(); liveSnap = o; } o[k] = v; store(); redraw(); };
-    const optText = el('span', { class: 'ed-opts', 'data-for': 'text' }, 'Size', num(pref.ts, 6, 96, 1, v => { pref.ts = v; savePref(); applySel(cur('text'), 'size', v); }, 'Font size'),
-      color(pref.tc, v => { pref.tc = v; savePref(); applySel(cur('text'), 'c', v); }, 'Text color'));
-    const optHl = el('span', { class: 'ed-opts', 'data-for': 'hl' }, HL.map(([n, c]) => el('button', { class: 'ed-sw', title: n + ' highlighter', 'data-c': c, style: 'background:' + c, onclick: () => { pref.hl = c; savePref(); paintSw(); applySel(cur(['hb', 'hl']), 'c', c); } })),
-      color(pref.hl, v => { pref.hl = v; savePref(); paintSw(); applySel(cur(['hb', 'hl']), 'c', v); }, 'Custom highlighter color'),
-      'Size', rng(pref.hs, 4, 60, 1, v => { pref.hs = v; savePref(); applySel(cur('hb'), 'w', v); }, 'Highlighter size'),
-      'Opacity', rng(pref.ho, 0.1, 0.9, 0.05, v => { pref.ho = v; savePref(); applySel(cur(['hb', 'hl']), 'o', v); }, 'Highlighter opacity'));
-    const optPen = el('span', { class: 'ed-opts', 'data-for': 'pen' }, color(pref.pc, v => { pref.pc = v; savePref(); applySel(cur('pen'), 'c', v); }, 'Pen color'), 'Width', rng(pref.pw, 1, 20, 1, v => { pref.pw = v; savePref(); applySel(cur('pen'), 'w', v); }, 'Pen width'));
-    const fillChk = el('input', { type: 'checkbox', 'aria-label': 'Fill shape' }); fillChk.checked = pref.sf;
-    fillChk.addEventListener('change', () => { pref.sf = fillChk.checked; savePref(); applySel(cur('shape'), 'fill', pref.sf ? pref.sfc : null); });
-    const optShape = el('span', { class: 'ed-opts', 'data-for': 'rect ell line arrow' }, 'Line', color(pref.sc, v => { pref.sc = v; savePref(); applySel(cur('shape'), 'c', v); }, 'Shape line color'),
-      'Width', rng(pref.sw, 0, 20, 1, v => { pref.sw = v; savePref(); applySel(cur('shape'), 'lw', v); }, 'Shape line width'),
-      el('label', { class: 'ed-fill' }, fillChk, 'Fill'), color(pref.sfc, v => { pref.sfc = v; savePref(); if (pref.sf) applySel(cur('shape'), 'fill', v); }, 'Shape fill color'));
-    const optEr = el('span', { class: 'ed-opts', 'data-for': 'er' }, 'Eraser size', rng(pref.es, 4, 80, 1, v => { pref.es = v; savePref(); sizeRing(); }, 'Eraser size'), el('span', { class: 'muted' }, 'Drag to erase highlighter and pen. Click text, an image, a shape or a whiteout to delete it.'));
-    const optWo = el('span', { class: 'ed-opts', 'data-for': 'wo' }, el('span', { class: 'muted' }, 'Drag a white box to cover something on the page.'));
-    const optSel = el('span', { class: 'ed-opts', 'data-for': 'select' }, el('span', { class: 'muted' }, 'Click to select, drag to move, corner to resize. Del deletes.'));
-    const paintSw = () => root2.querySelectorAll('.ed-sw').forEach(b => b.classList.toggle('on', b.dataset.c === pref.hl));
+    const apBtn = el('button', { class: 'ed-tool ed-append', title: 'Append mode: drag on the page to add a box (A)', onclick: () => setAppend(!pref.append) }, '▭ Append');
+    const kBtns = Object.entries(BOX).map(([k, b]) => el('button', { class: 'ed-kind', 'data-k': k, title: b.n + (k === 'hl' ? ' (see-through yellow)' : ' (solid black)'), onclick: () => setKind(k) }, el('span', { class: 'ed-swatch ' + k }), b.n));
     const ub = el('button', { title: 'Undo (Ctrl+Z)', onclick: () => undo() }, '↶ Undo'), rb = el('button', { title: 'Redo (Ctrl+Y)', onclick: () => redo() }, '↷ Redo');
-    const db = el('button', { title: 'Delete selected (Del)', onclick: () => del() }, '🗑 Delete');
+    const db = el('button', { title: 'Delete selected box (Del)', onclick: () => del() }, '🗑 Delete');
     const zc = BP.zoomControl({ target: stage, get: () => pref.z, set: z => { pref.z = z; savePref(); zc.refresh(); layoutSheet(); }, fit: () => (stage.clientWidth - 40) / (dw * 1.5) });
-    const imgIn = el('input', { type: 'file', accept: 'image/png,image/jpeg', hidden: '' });
-    imgIn.addEventListener('change', () => { const fl = imgIn.files[0]; imgIn.value = ''; if (fl) insertImage(fl); });
+    const hint = el('span', { class: 'muted' });
     const root2 = el('div', { class: 'ed', role: 'dialog', 'aria-label': 'Edit page' },
       el('div', { class: 'ed-bar' },
         el('strong', { class: 'ed-title' }, it.f + ' · page ' + (i + 1) + ' · ' + (sec.title || 'Untitled')),
-        el('span', { class: 'ed-tools' }, toolBtn('select', '⬚ Select', 'Select and move (V)'), toolBtn('text', 'T Text', 'Add text (T)'), toolBtn('hl', '🖌 Highlighter', 'Highlighter brush (H)'), toolBtn('pen', '✎ Pen', 'Pen (P)'), toolBtn('er', '⌫ Eraser', 'Eraser (E)'),
-          toolBtn('rect', '▭', 'Rectangle (R)'), toolBtn('ell', '◯', 'Ellipse (O)'), toolBtn('line', '╱', 'Line (L)'), toolBtn('arrow', '↗', 'Arrow (A)'), toolBtn('wo', '⬜ Whiteout', 'Whiteout box (W)'),
-          el('button', { class: 'ed-tool ed-imgbtn', title: 'Insert a PNG or JPG image (I)', onclick: () => imgIn.click() }, '🖼 Image'), imgIn),
-        optSel, optText, optHl, optPen, optShape, optEr, optWo),
+        apBtn, el('span', { class: 'ed-kinds', role: 'group', 'aria-label': 'Box type' }, kBtns), hint),
       el('div', { class: 'ed-bar ed-bar2' }, ub, rb, db,
-        el('button', { title: 'Remove all edits on this page', onclick: () => { if (!ops.length || !confirm('Clear all edits on this page?')) return; snap(); ops = []; sel = -1; store(); redraw(); } }, 'Clear page'),
+        el('button', { title: 'Remove all boxes on this page', onclick: () => { if (!ops.length || !confirm('Remove all boxes on this page?')) return; snap(); ops = []; sel = -1; store(); redraw(); } }, 'Clear page'),
         zc, el('span', { class: 'muted' }, 'Ctrl + scroll to zoom'), el('span', { style: 'flex:1' }),
         el('button', { class: 'primary ed-done', onclick: () => close() }, 'Done')),
       stage);
     document.body.append(root2);
-    const sizeRing = () => { const d = pref.es * s(); ring.style.width = ring.style.height = d + 'px'; };
-    function setTool(k) {
-      pref.tool = k; savePref(); if (k !== 'select') sel = -1;
-      liveSnap = null;
-      root2.dataset.tool = k;
-      root2.querySelectorAll('.ed-tool').forEach(b => b.classList.toggle('on', b.dataset.tool === k));
-      root2.querySelectorAll('.ed-opts').forEach(o => o.hidden = !o.dataset.for.split(' ').includes(k));
-      ring.hidden = k !== 'er'; sizeRing();
-      redraw();
+    function setAppend(v) {
+      pref.append = v; savePref();
+      apBtn.classList.toggle('on', v); apBtn.setAttribute('aria-pressed', v);
+      root2.classList.toggle('appending', v);
+      hint.textContent = v ? 'Drag on the page to add a box. Press A to stop appending.' : 'Click a box to select it, drag to move, drag the corner to resize. Press A to append.';
     }
-    function showSelOpts() {
-      const o = ops[sel]; if (pref.tool !== 'select' || !o) return;
-      const k = o.t === 'text' ? 'text' : o.t === 'hb' || o.t === 'hl' ? 'hl' : o.t === 'pen' ? 'pen' : o.t === 'shape' ? o.k : null;
-      root2.querySelectorAll('.ed-opts').forEach(x => x.hidden = !x.dataset.for.split(' ').includes(k || 'select'));
+    function setKind(k) {
+      pref.k = k; savePref();
+      kBtns.forEach(b => { const on = b.dataset.k === k; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+      const o = ops[sel];
+      if (o && o.k !== k) { snap(); o.k = k; store(); redraw(); }
     }
     function layoutSheet() {
       sheet.style.width = dw * s() + 'px'; sheet.style.height = dh * s() + 'px';
-      sizeRing(); redraw();
+      redraw();
       clearTimeout(bgTimer); bgTimer = setTimeout(drawBg, 150);
     }
     async function drawBg() {
@@ -607,157 +504,76 @@
       await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
       bg.width = c.width; bg.height = c.height; bg.getContext('2d').drawImage(c, 0, 0);
     }
-    function paintLayer(cv, fn, extra) {
+    function paint(extra) {
       const dpr = window.devicePixelRatio || 1, k = s() * dpr;
-      cv.width = Math.ceil(dw * k); cv.height = Math.ceil(dh * k);
-      const ctx = cv.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); fn(ctx, extra ? ops.concat(extra) : ops);
-    }
-    const drawInkLayer = extra => paintLayer(ink, drawInk, extra);
-    const drawObjLayer = extra => paintLayer(objc, drawObjs, extra);
-    const norm = o => { if (o.w < 0) { o.x += o.w; o.w = -o.w; } if (o.h < 0) { o.y += o.h; o.h = -o.h; } return o; };
-    function bbox(o) {
-      if (o.p) { const xs = o.p.map(p => p[0]), ys = o.p.map(p => p[1]), m = o.w / 2; return { x: Math.min(...xs) - m, y: Math.min(...ys) - m, w: Math.max(...xs) - Math.min(...xs) + 2 * m, h: Math.max(...ys) - Math.min(...ys) + 2 * m }; }
-      const m = o.t === 'shape' ? o.lw / 2 : 0;
-      return { x: Math.min(o.x, o.x + o.w) - m, y: Math.min(o.y, o.y + o.h) - m, w: Math.abs(o.w) + 2 * m, h: Math.abs(o.h) + 2 * m };
+      lay.width = Math.ceil(dw * k); lay.height = Math.ceil(dh * k);
+      const ctx = lay.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawBoxes(ctx, extra ? ops.concat(extra) : ops);
     }
     function redraw() {
-      drawObjLayer(); drawInkLayer();
+      paint();
       const z = s(); objs.textContent = '';
-      ops.forEach((o, k) => {
-        if (o.t !== 'text') return;
-        const ta = el('textarea', { class: 'ed-ta', spellcheck: 'false', 'aria-label': 'Text' });
-        ta.value = o.text;
-        ta.style.cssText = 'font-size:' + o.size * z + 'px;color:' + o.c;
-        let edited = false;
-        ta.addEventListener('focus', () => { sel = k; edited = false; markSel(); });
-        ta.addEventListener('input', () => { if (!edited) { snap(); edited = true; } o.text = ta.value; store(); });
-        ta.addEventListener('blur', () => { if (!o.text.trim() && ops.includes(o)) { ops.splice(ops.indexOf(o), 1); sel = -1; store(); redraw(); } });
-        const box = el('div', { class: 'ed-text', 'data-k': k }, ta);
-        box.style.cssText = 'left:' + o.x * z + 'px;top:' + o.y * z + 'px;width:' + o.w * z + 'px;height:' + o.h * z + 'px';
-        objs.append(box);
-      });
-      if (sel >= 0 && ops[sel] && pref.tool === 'select') {
-        const o = ops[sel], b = bbox(o);
-        const sb = el('div', { class: 'ed-sel' }, o.p ? null : el('span', { class: 'ed-rs', title: 'Resize' }));
-        sb.style.cssText = 'left:' + b.x * z + 'px;top:' + b.y * z + 'px;width:' + b.w * z + 'px;height:' + b.h * z + 'px';
-        if (o.t === 'shape' && (o.k === 'line' || o.k === 'arrow')) { const rs = sb.firstChild; rs.style.cssText = 'left:' + ((o.x + o.w - b.x) * z - 6) + 'px;top:' + ((o.y + o.h - b.y) * z - 6) + 'px;right:auto;bottom:auto'; }
+      const o = ops[sel];
+      if (o) {
+        const sb = el('div', { class: 'ed-sel' }, el('span', { class: 'ed-rs', title: 'Resize' }));
+        sb.style.cssText = 'left:' + o.x * z + 'px;top:' + o.y * z + 'px;width:' + o.w * z + 'px;height:' + o.h * z + 'px';
         objs.append(sb);
       }
-      markSel(); showSelOpts();
-      ub.disabled = !hist.length; rb.disabled = !fut.length;
+      ub.disabled = !hist.length; rb.disabled = !fut.length; db.disabled = !o;
     }
-    const markSel = () => { objs.querySelectorAll('.ed-text').forEach(b => b.classList.toggle('on', +b.dataset.k === sel)); db.disabled = !(sel >= 0 && ops[sel]); };
     const pt = e => { const r = sheet.getBoundingClientRect(); return [(e.clientX - r.left) / s(), (e.clientY - r.top) / s()]; };
-    const segD = (px, py, ax, ay, bx, by) => { const dx = bx - ax, dy = by - ay, l = dx * dx + dy * dy, t = l ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / l)) : 0; return Math.hypot(px - ax - t * dx, py - ay - t * dy); };
-    function hit(x, y, skipText) {
-      for (let k = ops.length - 1; k >= 0; k--) {
-        const o = ops[k];
-        if (o.t === 'er' || (skipText && o.t === 'text')) continue;
-        if (o.p) { if (o.p.some(([a, b], j) => (j ? segD(x, y, o.p[j - 1][0], o.p[j - 1][1], a, b) : Math.hypot(a - x, b - y)) <= o.w / 2 + 3)) return k; continue; }
-        if (o.t === 'shape' && (o.k === 'line' || o.k === 'arrow')) { if (segD(x, y, o.x, o.y, o.x + o.w, o.y + o.h) <= o.lw / 2 + 5) return k; continue; }
-        if (o.t === 'shape' && !o.fill && o.k === 'rect') { const b = bbox(o), e = o.lw / 2 + 5; if (x >= b.x - e && x <= b.x + b.w + e && y >= b.y - e && y <= b.y + b.h + e && !(x > b.x + e && x < b.x + b.w - e && y > b.y + e && y < b.y + b.h - e)) return k; continue; }
-        const b = bbox(o); if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return k;
-      }
-      return -1;
-    }
+    const hit = (x, y) => { for (let k = ops.length - 1; k >= 0; k--) { const o = ops[k]; if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) return k; } return -1; };
     function drag(e, move, up) {
       e.preventDefault();
-      const id2 = e.pointerId; sheet.setPointerCapture && sheet.setPointerCapture(id2);
-      const mv = ev => { if (ev.pointerId === id2) move(pt(ev), ev); };
-      const end = ev => { if (ev.pointerId !== id2) return; sheet.removeEventListener('pointermove', mv); sheet.removeEventListener('pointerup', end); sheet.removeEventListener('pointercancel', end); up && up(pt(ev), ev); };
+      const pid = e.pointerId; sheet.setPointerCapture && sheet.setPointerCapture(pid);
+      const mv = ev => { if (ev.pointerId === pid) move(pt(ev)); };
+      const end = ev => { if (ev.pointerId !== pid) return; sheet.removeEventListener('pointermove', mv); sheet.removeEventListener('pointerup', end); sheet.removeEventListener('pointercancel', end); up(); };
       sheet.addEventListener('pointermove', mv); sheet.addEventListener('pointerup', end); sheet.addEventListener('pointercancel', end);
     }
-    sheet.addEventListener('pointermove', e => { if (pref.tool !== 'er') return; const r = sheet.getBoundingClientRect(); ring.style.left = e.clientX - r.left + 'px'; ring.style.top = e.clientY - r.top + 'px'; ring.hidden = false; });
-    sheet.addEventListener('pointerleave', () => { ring.hidden = true; });
+    const clampBox = o => { o.x = Math.max(0, Math.min(o.x, dw - o.w)); o.y = Math.max(0, Math.min(o.y, dh - o.h)); };
     sheet.addEventListener('pointerdown', e => {
       if (e.button) return;
-      liveSnap = null;
-      const [x, y] = pt(e), tool = pref.tool, tbox = e.target.closest('.ed-text');
-      if (tool === 'text') {
-        if (tbox) return;
-        e.preventDefault();
-        snap(); ops.push({ t: 'text', x, y: y - pref.ts * 0.6, w: Math.min(220, dw - x), h: pref.ts * 2.6, text: '', size: pref.ts, c: pref.tc });
-        sel = ops.length - 1; store(); redraw();
-        const ta = objs.querySelector('.ed-text[data-k="' + sel + '"] textarea'); ta && setTimeout(() => ta.focus());
-        return;
-      }
-      if (tool === 'hl' || tool === 'pen' || tool === 'er') {
-        if (tool === 'er' && tbox) { snap(); ops.splice(+tbox.dataset.k, 1); sel = -1; store(); redraw(); e.preventDefault(); return; }
-        const o = tool === 'pen' ? { t: 'pen', p: [[x, y]], c: pref.pc, w: pref.pw, o: 1 } : tool === 'hl' ? { t: 'hb', p: [[x, y]], c: pref.hl, w: pref.hs, o: pref.ho } : { t: 'er', p: [[x, y]], w: pref.es };
-        let far = 0;
-        drawInkLayer(o);
-        drag(e, ([a, b]) => { const l = o.p[o.p.length - 1]; if (Math.hypot(a - l[0], b - l[1]) < 0.6) return; far = Math.max(far, Math.hypot(a - x, b - y)); o.p.push([+a.toFixed(1), +b.toFixed(1)]); drawInkLayer(o); }, () => {
-          if (tool === 'er' && far < 3) { const k = hit(x, y, true); drawInkLayer(); if (k >= 0) { snap(); ops.splice(k, 1); store(); redraw(); } return; }
-          snap(); ops.push(o); store(); redraw();
+      const [x, y] = pt(e), rs = e.target.closest('.ed-rs');
+      const k = rs ? sel : hit(x, y);
+      if (pref.append && !rs) {
+        const o = { t: 'box', k: pref.k, x, y, w: 0, h: 0 };
+        sel = -1; redraw();
+        drag(e, ([a, b]) => { a = Math.max(0, Math.min(dw, a)); b = Math.max(0, Math.min(dh, b)); o.x = Math.min(x, a); o.y = Math.min(y, b); o.w = Math.abs(a - x); o.h = Math.abs(b - y); paint(o); }, () => {
+          if (o.w < 3 || o.h < 3) { sel = k; if (k >= 0) setKind(ops[k].k); redraw(); } else { snap(); ops.push(o); store(); redraw(); }
         });
         return;
       }
-      if (SHAPES[tool] || tool === 'wo') {
-        const o = tool === 'wo' ? { t: 'wo', x, y, w: 0, h: 0 } : { t: 'shape', k: tool, x, y, w: 0, h: 0, c: pref.sc, lw: pref.sw, fill: pref.sf && (tool === 'rect' || tool === 'ell') ? pref.sfc : null };
-        drag(e, ([a, b], ev) => { o.w = a - x; o.h = b - y; if (ev.shiftKey && o.k !== 'line' && o.k !== 'arrow') { const m = Math.max(Math.abs(o.w), Math.abs(o.h)); o.w = Math.sign(o.w || 1) * m; o.h = Math.sign(o.h || 1) * m; } drawObjLayer(o); }, () => {
-          if (Math.hypot(o.w, o.h) < 3) { drawObjLayer(); return; }
-          if (o.t === 'wo' || o.k === 'rect' || o.k === 'ell') norm(o);
-          snap(); ops.push(o); store(); redraw();
-        });
-        return;
-      }
-      const rs = e.target.closest('.ed-rs');
-      const k = rs ? sel : tbox ? +tbox.dataset.k : hit(x, y);
-      sel = k; redraw();
+      sel = k; if (k >= 0) setKind(ops[k].k); redraw();
       if (k < 0) return;
-      const o = ops[k], start = JSON.stringify(ops), o0 = JSON.parse(JSON.stringify(o));
-      let movedAny = false;
+      const o = ops[k], start = JSON.stringify(ops), o0 = Object.assign({}, o);
+      let moved = false;
       drag(e, ([a, b]) => {
-        const dx = a - x, dy = b - y; movedAny = true;
-        if (rs) {
-          if (o.t === 'shape' && (o.k === 'line' || o.k === 'arrow')) { o.w = o0.w + dx; o.h = o0.h + dy; }
-          else if (o.t === 'img') { o.w = Math.max(10, o0.w + dx); o.h = o.w * o0.h / o0.w; }
-          else { o.w = Math.max(8, o0.w + dx); o.h = Math.max(6, o0.h + dy); }
-        }
-        else if (o.p) o.p = o0.p.map(([px, py]) => [px + dx, py + dy]);
-        else { o.x = o0.x + dx; o.y = o0.y + dy; }
+        const dx = a - x, dy = b - y; moved = true;
+        if (rs) { o.w = Math.max(4, Math.min(dw - o.x, o0.w + dx)); o.h = Math.max(4, Math.min(dh - o.y, o0.h + dy)); }
+        else { o.x = o0.x + dx; o.y = o0.y + dy; clampBox(o); }
         redraw();
-      }, () => { if (movedAny) { hist.push(start); fut = []; store(); redraw(); } });
+      }, () => { if (moved) { hist.push(start); fut = []; store(); redraw(); } });
     });
-    async function insertImage(fl) {
-      try {
-        const bytes = new Uint8Array(await fl.arrayBuffer()), type = imgType(bytes);
-        if (!type) { status('Only PNG and JPG images can be inserted.'); return; }
-        const im = await makeImg(bytes, type), ref = 'img' + id();
-        const p = Promise.resolve(im); p.done = im; IMGS.set(ref, p);
-        try { await idbDo('readwrite', st => st.put({ bytes: bytes.buffer, type }, ref)); } catch (e) { status('The image is placed, but it could not be saved in this browser, so it will be gone after a reload.'); }
-        const w = Math.min(dw * 0.5, im.el.naturalWidth * 0.75), h = w * im.el.naturalHeight / im.el.naturalWidth;
-        snap(); ops.push({ t: 'img', ref, x: (dw - w) / 2, y: Math.max(10, (dh - h) / 3), w, h });
-        sel = ops.length - 1; setTool('select'); store(); redraw();
-      } catch (e) { status('That image could not be read.'); }
-    }
-    function del() { if (!(sel >= 0 && ops[sel])) return; snap(); ops.splice(sel, 1); sel = -1; store(); redraw(); }
+    function del() { if (!ops[sel]) return; snap(); ops.splice(sel, 1); sel = -1; store(); redraw(); }
     function undo() { if (!hist.length) return; fut.push(JSON.stringify(ops)); ops = JSON.parse(hist.pop()); sel = -1; store(); redraw(); }
     function redo() { if (!fut.length) return; hist.push(JSON.stringify(ops)); ops = JSON.parse(fut.pop()); sel = -1; store(); redraw(); }
-    const KEYS = { v: 'select', t: 'text', h: 'hl', p: 'pen', e: 'er', r: 'rect', o: 'ell', l: 'line', a: 'arrow', w: 'wo' };
     const key = e => {
-      const typing = e.target.closest && e.target.closest('textarea,input');
-      if (e.key === 'Escape') { e.stopImmediatePropagation(); if (typing) e.target.blur(); else close(); return; }
-      if (typing) return;
+      if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); return; }
+      if (e.target.closest && e.target.closest('input,textarea')) return;
       const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
       if (c && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
       else if (c && k === 'y') { e.preventDefault(); redo(); }
       else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); del(); }
-      else if (!c && k === 'i') imgIn.click();
-      else if (!c && KEYS[k]) setTool(KEYS[k]);
+      else if (!c && !e.altKey && k === 'a') { e.preventDefault(); setAppend(!pref.append); }
     };
     document.addEventListener('keydown', key, true);
     function close() {
-      if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
       document.removeEventListener('keydown', key, true);
       root2.remove(); store(); renderSections(); renderPreview();
       if (onClosed) onClosed();
       const n = (it.ann && it.ann[i] || []).length;
-      status(n ? 'Saved ' + n + ' edit' + (n === 1 ? '' : 's') + ' on ' + it.f + ' page ' + (i + 1) + '.' : 'No edits on ' + it.f + ' page ' + (i + 1) + '.');
+      status(n ? 'Saved ' + n + ' box' + (n === 1 ? '' : 'es') + ' on ' + it.f + ' page ' + (i + 1) + '.' : 'No boxes on ' + it.f + ' page ' + (i + 1) + '.');
     }
-    let onClosed = null;
-    paintSw(); setTool(pref.tool);
-    await ensureImgs(ops);
+    setAppend(pref.append); setKind(pref.k); redraw();
     try {
       const doc = await getDoc(it.f);
       page = await doc.getPage(i + 1);
@@ -767,41 +583,16 @@
     return { set onClose(fn) { onClosed = fn; } };
   }
 
-  async function flatten(out, cp, ops, font, cache) {
-    const { degrees, rgb, LineCapStyle } = PDFLib;
+  function flatten(cp, ops) {
+    const { rgb } = PDFLib;
     const r = ((cp.getRotation().angle % 360) + 360) % 360;
     const cb = cp.getCropBox(), x0 = cb.x, y0 = cb.y, w = cb.width, h = cb.height;
     const map = (X, Y) => ({ 0: [x0 + X, y0 + h - Y], 90: [x0 + Y, y0 + X], 180: [x0 + w - X, y0 + Y], 270: [x0 + w - Y, y0 + h - X] }[r] || [x0 + X, y0 + h - Y]);
-    const mapRect = (X, Y, W, H) => { const [ax, ay] = map(X, Y), [bx, by] = map(X + W, Y + H); return { x: Math.min(ax, bx), y: Math.min(ay, by), width: Math.abs(bx - ax), height: Math.abs(by - ay) }; };
-    const hex = c => { const m = /^#?([0-9a-f]{6})$/i.exec(c || ''); const n = m ? parseInt(m[1], 16) : 0; return rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); };
-    const line = (a, b, o) => { const [sx, sy] = map(a[0], a[1]), [ex, ey] = map(b[0], b[1]); cp.drawLine({ start: { x: sx, y: sy }, end: { x: ex, y: ey }, thickness: o.lw, color: hex(o.c), lineCap: LineCapStyle.Round }); };
-    for (const o of ops) {
-      if (o.t === 'wo') cp.drawRectangle(Object.assign(mapRect(o.x, o.y, o.w, o.h), { color: rgb(1, 1, 1), borderWidth: 0 }));
-      else if (o.t === 'img') {
-        if (!cache.has(o.ref)) { const im = await loadImg(o.ref); cache.set(o.ref, im ? await (im.type === 'png' ? out.embedPng(im.bytes) : out.embedJpg(im.bytes)) : null); }
-        const emb = cache.get(o.ref); if (!emb) continue;
-        const [x, y] = map(o.x, o.y + o.h);
-        cp.drawImage(emb, { x, y, width: o.w, height: o.h, rotate: degrees(r) });
-      } else if (o.t === 'shape') {
-        if (o.k === 'rect') { const R = mapRect(o.x, o.y, o.w, o.h); cp.drawRectangle(Object.assign(R, { borderColor: o.lw ? hex(o.c) : undefined, borderWidth: o.lw, color: o.fill ? hex(o.fill) : undefined })); }
-        else if (o.k === 'ell') { const [cx, cy] = map(o.x + o.w / 2, o.y + o.h / 2), sw = r % 180 ? [o.h / 2, o.w / 2] : [o.w / 2, o.h / 2]; cp.drawEllipse({ x: cx, y: cy, xScale: sw[0], yScale: sw[1], borderColor: o.lw ? hex(o.c) : undefined, borderWidth: o.lw, color: o.fill ? hex(o.fill) : undefined }); }
-        else if (o.lw) { line([o.x, o.y], [o.x + o.w, o.y + o.h], o); if (o.k === 'arrow') { const hd = arrowHead(o); line(hd[0], hd[1], o); line(hd[2], hd[1], o); } }
-      }
-    }
-    if (ops.some(o => isInk(o) && o.t !== 'er')) {
-      const k = 2, Iw = Math.ceil(w * k), Ih = Math.ceil(h * k);
-      const T = { 0: [k, 0, 0, k, 0, 0], 90: [0, -k, k, 0, 0, Ih], 180: [-k, 0, 0, -k, Iw, Ih], 270: [0, k, -k, 0, Iw, 0] }[r] || [k, 0, 0, k, 0, 0];
-      const c = inkLayer(Iw, Ih, T, ops);
-      const blob = await new Promise(res => c.toBlob(res, 'image/png'));
-      cp.drawImage(await out.embedPng(await blob.arrayBuffer()), { x: x0, y: y0, width: w, height: h });
-    }
     ops.forEach(o => {
-      if (o.t !== 'text' || !o.text) return;
-      wrapText(winAnsi(o.text), o.w, s => font.widthOfTextAtSize(s, o.size)).forEach((ln, j) => {
-        if (!ln) return;
-        const [x, y] = map(o.x, o.y + o.size * (0.9 + 1.2 * j));
-        cp.drawText(ln, { x, y, size: o.size, font, color: hex(o.c), rotate: degrees(r) });
-      });
+      const b = BOX[o.k]; if (!b) return;
+      const [ax, ay] = map(o.x, o.y), [bx, by] = map(o.x + o.w, o.y + o.h);
+      const n = parseInt(b.c.slice(1), 16);
+      cp.drawRectangle({ x: Math.min(ax, bx), y: Math.min(ay, by), width: Math.abs(bx - ax), height: Math.abs(by - ay), color: rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255), opacity: b.o, borderWidth: 0 });
     });
   }
 
@@ -839,8 +630,6 @@
         });
       }
       const firstPage = new Map();
-      let annFont = null;
-      const imgCache = new Map();
       let done = 0;
       for (const r of L) {
         for (const p of r.refs) {
@@ -853,7 +642,7 @@
             const [cp] = await out.copyPages(src, [p.i]);
             out.addPage(cp);
             const ann = p.it && p.it.ann && p.it.ann[p.i];
-            if (ann && ann.length) { annFont = annFont || await out.embedFont(StandardFonts.Helvetica); await flatten(out, cp, ann, annFont, imgCache); }
+            if (ann && ann.length) flatten(cp, ann);
             if (!firstPage.has(r.sec.id)) firstPage.set(r.sec.id, cp);
           } catch (e) { problems.push(p.f + ' p' + (p.i + 1)); }
         }
