@@ -596,6 +596,23 @@
     });
   }
 
+  const RASTER_DPI = 250;
+  async function rasterPage(out, f, i, ann) {
+    const page = await (await getDoc(f)).getPage(i + 1);
+    const v1 = page.getViewport({ scale: 1 }), k = RASTER_DPI / 72, vp = page.getViewport({ scale: k });
+    const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+    await page.render({ canvasContext: ctx, viewport: vp }).promise;
+    page.cleanup();
+    ctx.setTransform(c.width / v1.width, 0, 0, c.height / v1.height, 0, 0); drawBoxes(ctx, ann);
+    const blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+    c.width = c.height = 0;
+    const img = await out.embedJpg(await blob.arrayBuffer());
+    const pg = out.addPage([v1.width, v1.height]);
+    pg.drawImage(img, { x: 0, y: 0, width: v1.width, height: v1.height });
+    return pg;
+  }
   async function build() {
     const L = layout();
     const total = L.reduce((a, r) => a + r.refs.length, 0);
@@ -639,10 +656,10 @@
             if (!srcs.has(p.f)) srcs.set(p.f, await PDFDocument.load(await files.get(p.f).file.arrayBuffer(), { ignoreEncryption: true }));
             const src = srcs.get(p.f);
             if (p.i >= src.getPageCount()) throw new Error('range');
-            const [cp] = await out.copyPages(src, [p.i]);
-            out.addPage(cp);
             const ann = p.it && p.it.ann && p.it.ann[p.i];
-            if (ann && ann.length) flatten(cp, ann);
+            let cp;
+            if (ann && ann.some(o => o.k === 'cen')) cp = await rasterPage(out, p.f, p.i, ann);
+            else { [cp] = await out.copyPages(src, [p.i]); out.addPage(cp); if (ann && ann.length) flatten(cp, ann); }
             if (!firstPage.has(r.sec.id)) firstPage.set(r.sec.id, cp);
           } catch (e) { problems.push(p.f + ' p' + (p.i + 1)); }
         }
