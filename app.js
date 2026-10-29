@@ -133,6 +133,8 @@
   }
 
   const expanded = new Set();
+  const BP = window.BuildPDF = window.BuildPDF || { builders: [], active: null };
+  BP.register = b => BP.builders.push(b);
   let formatMenu = () => null;
   const findCard = kid => { for (const c of board.cols) { const i = c.cards.findIndex(k => k.id === kid); if (i >= 0) return { col: c, i, card: c.cards[i] }; } return null; };
   const baseName = p => p.split('/').pop();
@@ -282,31 +284,42 @@
   const SKEY = 'buildpdf.thumbSize';
   const thumbSize = () => { const v = localStorage.getItem(SKEY); return SIZES[v] ? v : 'L'; };
 
-  function closePicker() {
+  function closePicker(done) {
     if (!picker) return;
     picker.obs.disconnect();
     if (picker.doc) picker.doc.destroy();
     picker.root.remove();
+    const me = picker;
     picker = null;
-    updateCounts();
+    if (done && me.opts.onDone && me.sel) me.opts.onDone([...me.sel].sort((a, b) => a - b), me.n);
+    if (me.opts.onClose) me.opts.onClose();
   }
 
-  async function openPicker(p) {
+  function openPicker(p) {
     const f = files.get(p);
     if (!f) { status(baseName(p) + ' is not loaded. Add its folder again first.'); return; }
+    openPickerFor({
+      file: f.file, title: baseName(p),
+      initial: n => { f.pages = n; return selOf(p, n); },
+      onChange: (arr, n) => setSel(p, n, arr),
+      onClose: updateCounts
+    });
+  }
+
+  async function openPickerFor(opts) {
     closePicker();
     const grid = el('div', { class: 'pk-grid' }, el('p', { class: 'muted' }, 'Loading pages…'));
     const counter = el('span', { class: 'pk-count' });
-    const root = el('div', { class: 'overlay pk', onclick: e => { if (e.target === root) closePicker(); } },
+    const root = el('div', { class: 'overlay pk', onclick: e => { if (e.target === root) closePicker(!opts.onDone); } },
       el('div', { class: 'pk-box', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Choose pages' },
         el('div', { class: 'pk-head' },
-          el('strong', { class: 'pk-title' }, baseName(p)), counter,
+          el('strong', { class: 'pk-title' }, opts.title), counter,
           el('div', { class: 'pk-size', role: 'group', 'aria-label': 'Thumbnail size' }, Object.keys(SIZES).map(z => el('button', { class: 'pk-sz' + (z === thumbSize() ? ' on' : ''), 'data-size': z, title: 'Thumbnail size ' + z, onclick: () => setSize(z) }, z))),
           el('button', { onclick: () => setAll(true) }, 'Select all'),
           el('button', { onclick: () => setAll(false) }, 'Deselect all'),
-          el('button', { class: 'primary', onclick: closePicker }, 'Done'),
-          el('button', { class: 'icon', title: 'Close', onclick: closePicker }, '✕')),
-        el('p', { class: 'muted pk-hint' }, 'Click a page to include or leave it out. Shift-click to toggle a range.'),
+          el('button', { class: 'primary pk-done', onclick: () => closePicker(true) }, opts.doneLabel || 'Done'),
+          el('button', { class: 'icon', title: 'Close', onclick: () => closePicker(!opts.onDone) }, '✕')),
+        el('p', { class: 'muted pk-hint' }, opts.hint || 'Click a page to include or leave it out. Shift-click to toggle a range.'),
         grid));
     document.body.append(root);
     const applySize = () => root.style.setProperty('--tw', SIZES[thumbSize()] + 'px');
@@ -318,11 +331,11 @@
       if (!me.doc) return;
       me.thumbs.forEach(t => { t.querySelector('.pk-img').textContent = ''; me.obs.unobserve(t); me.obs.observe(t); });
     }
-    const me = picker = { root, obs: new IntersectionObserver(onSeen, { root: grid, rootMargin: '300px' }), doc: null, sel: null, n: 0, last: null, thumbs: [] };
+    const me = picker = { opts, root, obs: new IntersectionObserver(onSeen, { root: grid, rootMargin: '300px' }), doc: null, sel: null, n: 0, last: null, thumbs: [] };
     function paint() {
       me.thumbs.forEach((t, i) => { const on = me.sel.has(i); t.classList.toggle('on', on); t.setAttribute('aria-pressed', on); });
       counter.textContent = me.sel.size + ' of ' + me.n + ' pages selected';
-      setSel(p, me.n, [...me.sel]);
+      if (opts.onChange) opts.onChange([...me.sel], me.n);
     }
     function setAll(on) { if (!me.sel) return; me.sel = new Set(on ? [...Array(me.n).keys()] : []); paint(); }
     function click(i, e) {
@@ -354,11 +367,11 @@
     }
     try {
       const lib = await pdfjs();
-      const data = new Uint8Array(await f.file.arrayBuffer());
+      const data = new Uint8Array(await opts.file.arrayBuffer());
       const doc = await lib.getDocument({ data, isEvalSupported: false, disableFontFace: false, useSystemFonts: true }).promise;
       if (picker !== me) { doc.destroy(); return; }
-      me.doc = doc; me.n = doc.numPages; f.pages = me.n;
-      me.sel = new Set(selOf(p, me.n));
+      me.doc = doc; me.n = doc.numPages;
+      me.sel = new Set(opts.initial ? opts.initial(me.n) : [...Array(me.n).keys()]);
       grid.textContent = '';
       for (let i = 0; i < me.n; i++) {
         const t = el('button', { class: 'pk-thumb', 'data-i': i, title: 'Page ' + (i + 1), onclick: e => click(i, e) },
@@ -370,7 +383,7 @@
       grid.textContent = 'This PDF could not be opened for previews.';
     }
   }
-  document.addEventListener('keydown', e => { if (e.key === 'Escape' && picker) closePicker(); });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape' && picker) closePicker(!picker.opts.onDone); });
   document.addEventListener('mousedown', e => { if (e.shiftKey && e.target.closest && e.target.closest('.pk-thumb')) e.preventDefault(); });
 
   async function readDropped(items) {
@@ -400,7 +413,9 @@
   document.addEventListener('drop', async e => {
     if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
     e.preventDefault(); drop.classList.remove('over');
-    ingest(await readDropped(e.dataTransfer.items));
+    const b = BP.builders.find(x => x.id === BP.active);
+    const entries = await readDropped(e.dataTransfer.items);
+    if (b && b.onFiles) b.onFiles(entries); else ingest(entries);
   });
   $('#addList').onclick = () => { board.cols.push({ id: id('c'), type: 'output', title: 'New list', cards: [] }); save(); render(); boardEl.scrollLeft = boardEl.scrollWidth; };
   $('#buildAll').onclick = () => buildLists(board.cols.filter(c => c.type === 'output'));
@@ -625,6 +640,8 @@
   setInterval(checkVersion, 5 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkVersion(); });
 
+  Object.assign(BP, { el, status, pdfjs, openPicker: openPickerFor, readDropped, VERSION, baseName, isPdf });
+  BP.register({ id: 'board', name: 'Board builder', el: document.getElementById('builder-board') });
   load();
   render();
   if (allPaths().size) status('Your saved layout was restored. Add the same folders again to load the files.');
