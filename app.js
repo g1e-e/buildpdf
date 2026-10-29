@@ -403,8 +403,7 @@
       grid.textContent = '';
       for (let i = 0; i < me.n; i++) {
         const t = el('button', { class: 'pk-thumb', 'data-i': i, title: 'Page ' + (i + 1), onclick: e => click(i, e) },
-          el('div', { class: 'pk-img' }), el('span', { class: 'pk-check' }, '✓'), el('span', { class: 'pk-num' }, 'Page ' + (i + 1)),
-          opts.onEdit ? el('span', { class: 'pk-edit', role: 'button', tabindex: '0', title: 'Edit page ' + (i + 1), onclick: e => { e.stopPropagation(); opts.onEdit(i); } }, '✎ Edit') : null);
+          el('div', { class: 'pk-img' }), el('span', { class: 'pk-check' }, '✓'), el('span', { class: 'pk-num' }, 'Page ' + (i + 1)));
         me.thumbs.push(t); grid.append(t); me.obs.observe(t);
       }
       paint();

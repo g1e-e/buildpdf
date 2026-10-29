@@ -240,7 +240,6 @@
       initial: n => { f.n = n; return it.pages.filter(i => i < n); },
       hint: 'Pages for "' + sec.title + '". Click to include or leave out. Shift-click toggles a range.',
       onChange: arr => { it.pages = arr.slice().sort((a, b) => a - b); save(); renderToc(); renderPreview(); },
-      onEdit: async i => { const h = await openEditor(sec, it, i); if (h) h.onClose = () => BP.redecorate && BP.redecorate(); },
       decorate: (i, box, W, dw, dh) => paintAnnInto(box, it.ann && it.ann[i], W, dw, dh),
       onClose: () => changed(true)
     });
@@ -394,7 +393,7 @@
         if (cv.isConnected) { node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = w; node.getContext('2d').drawImage(cv, 0, 0); }
         t.textContent = ''; t.append(node);
         t.dataset.dw = cv.dataset.dw; t.dataset.dh = cv.dataset.dh;
-        paintAnn(t, t._it, i, +cv.dataset.dw, +cv.dataset.dh);
+        decorate(t);
       } catch (e) { t.textContent = 'Preview unavailable'; }
     }
   }, { root: prevCol, rootMargin: '800px' });
@@ -412,10 +411,10 @@
       if (nt.length) prev.append(el('p', { class: 'sb-prev-note' }, nt.join(' · ')));
       if (!r.refs.length) prev.append(el('p', { class: 'muted sb-prev-empty' }, blocked(r.sec) ? 'No pages (marked).' : 'No pages yet.'));
       r.refs.forEach((p, j) => {
-        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i, title: 'Click to edit this page', onclick: () => openEditor(r.sec, p.it, p.i) });
+        const t = el('div', { class: 'sb-page', 'data-f': p.f, 'data-i': p.i });
         t._it = p.it;
         const cv = thumbs.get(p.f + '\u0000' + p.i + '\u0000' + pw());
-        if (cv) { const node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = cv.dataset.w; node.getContext('2d').drawImage(cv, 0, 0); t.append(node); paintAnn(t, p.it, p.i, +cv.dataset.dw, +cv.dataset.dh); }
+        if (cv) { const node = document.createElement('canvas'); node.width = cv.width; node.height = cv.height; node.dataset.w = cv.dataset.w; node.getContext('2d').drawImage(cv, 0, 0); t.append(node); t.dataset.dw = cv.dataset.dw; t.dataset.dh = cv.dataset.dh; decorate(t); }
         else t.textContent = 'Loading…';
         prev.append(el('figure', { class: 'sb-fig' }, t, el('figcaption', {}, 'Page ' + (r.from + j) + ' · ' + p.f + ' p' + (p.i + 1))));
         obs.observe(t);
@@ -446,142 +445,104 @@
     const ctx = cv.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawBoxes(ctx, ops);
     box.append(cv);
   }
-  const paintAnn = (t, it, i, dw, dh) => paintAnnInto(t, it && it.ann && it.ann[i], pw(), dw, dh);
   const annCount = it => Object.values(it.ann || {}).reduce((a, l) => a + l.length, 0);
 
   const EKEY = 'buildpdf.editor';
-  async function openEditor(sec, it, i) {
-    const f = files.get(it.f);
-    if (!f) { status(it.f + ' is not loaded. Add it again first.'); return; }
-    const pref = Object.assign({ append: true, k: 'hl', z: 1 }, JSON.parse(localStorage.getItem(EKEY) || '{}'));
-    if (!BOX[pref.k]) pref.k = 'hl';
-    const savePref = () => localStorage.setItem(EKEY, JSON.stringify({ append: pref.append, k: pref.k, z: pref.z }));
-    let ops = JSON.parse(JSON.stringify((it.ann && it.ann[i]) || []));
-    let sel = -1, hist = [], fut = [], dw = 612, dh = 792, page = null, bgTimer = null, onClosed = null;
-    const s = () => pref.z * 1.5;
-    const snap = () => { hist.push(JSON.stringify(ops)); if (hist.length > 200) hist.shift(); fut = []; };
-    const store = () => { it.ann = it.ann || {}; if (ops.length) it.ann[i] = JSON.parse(JSON.stringify(ops)); else delete it.ann[i]; save(); };
-    const bg = el('canvas', { class: 'ed-bg' }), lay = el('canvas', { class: 'ed-boxes' }), objs = el('div', { class: 'ed-objs' });
-    const sheet = el('div', { class: 'ed-page' }, bg, lay, objs);
-    const stage = el('div', { class: 'ed-stage' }, sheet);
-    const apBtn = el('button', { class: 'ed-tool ed-append', title: 'Append mode: drag on the page to add a box (A)', onclick: () => setAppend(!pref.append) }, '▭ Append');
-    const kBtns = Object.entries(BOX).map(([k, b]) => el('button', { class: 'ed-kind', 'data-k': k, title: b.n + (k === 'hl' ? ' (see-through yellow)' : ' (solid black)'), onclick: () => setKind(k) }, el('span', { class: 'ed-swatch ' + k }), b.n));
-    const ub = el('button', { title: 'Undo (Ctrl+Z)', onclick: () => undo() }, '↶ Undo'), rb = el('button', { title: 'Redo (Ctrl+Y)', onclick: () => redo() }, '↷ Redo');
-    const db = el('button', { title: 'Delete selected box (Del)', onclick: () => del() }, '🗑 Delete');
-    const zc = BP.zoomControl({ target: stage, get: () => pref.z, set: z => { pref.z = z; savePref(); zc.refresh(); layoutSheet(); }, fit: () => (stage.clientWidth - 40) / (dw * 1.5) });
-    const hint = el('span', { class: 'muted' });
-    const root2 = el('div', { class: 'ed', role: 'dialog', 'aria-label': 'Edit page' },
-      el('div', { class: 'ed-bar' },
-        el('strong', { class: 'ed-title' }, it.f + ' · page ' + (i + 1) + ' · ' + (sec.title || 'Untitled')),
-        apBtn, el('span', { class: 'ed-kinds', role: 'group', 'aria-label': 'Box type' }, kBtns), hint),
-      el('div', { class: 'ed-bar ed-bar2' }, ub, rb, db,
-        el('button', { title: 'Remove all boxes on this page', onclick: () => { if (!ops.length || !confirm('Remove all boxes on this page?')) return; snap(); ops = []; sel = -1; store(); redraw(); } }, 'Clear page'),
-        zc, el('span', { class: 'muted' }, 'Ctrl + scroll to zoom'), el('span', { style: 'flex:1' }),
-        el('button', { class: 'primary ed-done', onclick: () => close() }, 'Done')),
-      stage);
-    document.body.append(root2);
-    function setAppend(v) {
-      pref.append = v; savePref();
-      apBtn.classList.toggle('on', v); apBtn.setAttribute('aria-pressed', v);
-      root2.classList.toggle('appending', v);
-      hint.textContent = v ? 'Drag on the page to add a box. Press A to stop appending.' : 'Click a box to select it, drag to move, drag the corner to resize. Press A to append.';
+  const pref = Object.assign({ append: false, k: 'hl' }, JSON.parse(localStorage.getItem(EKEY) || '{}'));
+  if (!BOX[pref.k]) pref.k = 'hl';
+  const savePref = () => localStorage.setItem(EKEY, JSON.stringify({ append: pref.append, k: pref.k }));
+  let sel = null, hist = [], fut = [];
+  const apBtn = el('button', { class: 'ed-tool ed-append', title: 'Append mode: drag on a preview page to add a box (A)', onclick: () => setAppend(!pref.append) }, '▭ Append');
+  const kBtns = Object.entries(BOX).map(([k, b]) => el('button', { class: 'ed-kind', 'data-k': k, title: b.n + (k === 'hl' ? ' (see-through yellow)' : ' (solid black)'), onclick: () => setKind(k) }, el('span', { class: 'ed-swatch ' + k }), b.n));
+  const ub = el('button', { title: 'Undo (Ctrl+Z)', onclick: () => undo() }, '↶'), rb = el('button', { title: 'Redo (Ctrl+Y)', onclick: () => redo() }, '↷');
+  const db = el('button', { title: 'Delete selected box (Del)', onclick: () => del() }, '🗑');
+  const apTools = el('span', { class: 'sb-aptools' }, el('span', { class: 'ed-kinds', role: 'group', 'aria-label': 'Box type' }, kBtns), ub, rb, db);
+  prevCol.querySelector('.sb-zoombar').append(apBtn, apTools);
+  const opsOf = (it, i) => (it.ann && it.ann[i]) || [];
+  const pagesOf = (it, i) => [...prev.querySelectorAll('.sb-page')].filter(t => t._it === it && +t.dataset.i === i);
+  function decorate(t, extra) {
+    const it = t._it, i = +t.dataset.i, dw = +t.dataset.dw, dh = +t.dataset.dh;
+    if (!dw) return;
+    paintAnnInto(t, extra ? opsOf(it, i).concat(extra) : opsOf(it, i), pw(), dw, dh);
+    t.querySelectorAll(':scope > .ed-sel').forEach(n => n.remove());
+    const o = sel && sel.it === it && sel.i === i && opsOf(it, i)[sel.k];
+    if (o) {
+      const sb = el('div', { class: 'ed-sel' }, el('span', { class: 'ed-rs', title: 'Resize' }));
+      sb.style.cssText = 'left:' + o.x / dw * 100 + '%;top:' + o.y / dh * 100 + '%;width:' + o.w / dw * 100 + '%;height:' + o.h / dh * 100 + '%';
+      t.append(sb);
     }
-    function setKind(k) {
-      pref.k = k; savePref();
-      kBtns.forEach(b => { const on = b.dataset.k === k; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
-      const o = ops[sel];
-      if (o && o.k !== k) { snap(); o.k = k; store(); redraw(); }
-    }
-    function layoutSheet() {
-      sheet.style.width = dw * s() + 'px'; sheet.style.height = dh * s() + 'px';
-      redraw();
-      clearTimeout(bgTimer); bgTimer = setTimeout(drawBg, 150);
-    }
-    async function drawBg() {
-      if (!page) return;
-      const dpr = window.devicePixelRatio || 1, vp = page.getViewport({ scale: s() * dpr });
-      const c = document.createElement('canvas'); c.width = Math.ceil(vp.width); c.height = Math.ceil(vp.height);
-      await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
-      bg.width = c.width; bg.height = c.height; bg.getContext('2d').drawImage(c, 0, 0);
-    }
-    function paint(extra) {
-      const dpr = window.devicePixelRatio || 1, k = s() * dpr;
-      lay.width = Math.ceil(dw * k); lay.height = Math.ceil(dh * k);
-      const ctx = lay.getContext('2d'); ctx.setTransform(k, 0, 0, k, 0, 0); drawBoxes(ctx, extra ? ops.concat(extra) : ops);
-    }
-    function redraw() {
-      paint();
-      const z = s(); objs.textContent = '';
-      const o = ops[sel];
-      if (o) {
-        const sb = el('div', { class: 'ed-sel' }, el('span', { class: 'ed-rs', title: 'Resize' }));
-        sb.style.cssText = 'left:' + o.x * z + 'px;top:' + o.y * z + 'px;width:' + o.w * z + 'px;height:' + o.h * z + 'px';
-        objs.append(sb);
-      }
-      ub.disabled = !hist.length; rb.disabled = !fut.length; db.disabled = !o;
-    }
-    const pt = e => { const r = sheet.getBoundingClientRect(); return [(e.clientX - r.left) / s(), (e.clientY - r.top) / s()]; };
-    const hit = (x, y) => { for (let k = ops.length - 1; k >= 0; k--) { const o = ops[k]; if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) return k; } return -1; };
-    function drag(e, move, up) {
-      e.preventDefault();
-      const pid = e.pointerId; sheet.setPointerCapture && sheet.setPointerCapture(pid);
-      const mv = ev => { if (ev.pointerId === pid) move(pt(ev)); };
-      const end = ev => { if (ev.pointerId !== pid) return; sheet.removeEventListener('pointermove', mv); sheet.removeEventListener('pointerup', end); sheet.removeEventListener('pointercancel', end); up(); };
-      sheet.addEventListener('pointermove', mv); sheet.addEventListener('pointerup', end); sheet.addEventListener('pointercancel', end);
-    }
-    const clampBox = o => { o.x = Math.max(0, Math.min(o.x, dw - o.w)); o.y = Math.max(0, Math.min(o.y, dh - o.h)); };
-    sheet.addEventListener('pointerdown', e => {
-      if (e.button) return;
-      const [x, y] = pt(e), rs = e.target.closest('.ed-rs');
-      const k = rs ? sel : hit(x, y);
-      if (pref.append && !rs) {
-        const o = { t: 'box', k: pref.k, x, y, w: 0, h: 0 };
-        sel = -1; redraw();
-        drag(e, ([a, b]) => { a = Math.max(0, Math.min(dw, a)); b = Math.max(0, Math.min(dh, b)); o.x = Math.min(x, a); o.y = Math.min(y, b); o.w = Math.abs(a - x); o.h = Math.abs(b - y); paint(o); }, () => {
-          if (o.w < 3 || o.h < 3) { sel = k; if (k >= 0) setKind(ops[k].k); redraw(); } else { snap(); ops.push(o); store(); redraw(); }
-        });
-        return;
-      }
-      sel = k; if (k >= 0) setKind(ops[k].k); redraw();
-      if (k < 0) return;
-      const o = ops[k], start = JSON.stringify(ops), o0 = Object.assign({}, o);
-      let moved = false;
-      drag(e, ([a, b]) => {
-        const dx = a - x, dy = b - y; moved = true;
-        if (rs) { o.w = Math.max(4, Math.min(dw - o.x, o0.w + dx)); o.h = Math.max(4, Math.min(dh - o.y, o0.h + dy)); }
-        else { o.x = o0.x + dx; o.y = o0.y + dy; clampBox(o); }
-        redraw();
-      }, () => { if (moved) { hist.push(start); fut = []; store(); redraw(); } });
-    });
-    function del() { if (!ops[sel]) return; snap(); ops.splice(sel, 1); sel = -1; store(); redraw(); }
-    function undo() { if (!hist.length) return; fut.push(JSON.stringify(ops)); ops = JSON.parse(hist.pop()); sel = -1; store(); redraw(); }
-    function redo() { if (!fut.length) return; hist.push(JSON.stringify(ops)); ops = JSON.parse(fut.pop()); sel = -1; store(); redraw(); }
-    const key = e => {
-      if (e.key === 'Escape') { e.stopImmediatePropagation(); close(); return; }
-      if (e.target.closest && e.target.closest('input,textarea')) return;
-      const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
-      if (c && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
-      else if (c && k === 'y') { e.preventDefault(); redo(); }
-      else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); del(); }
-      else if (!c && !e.altKey && k === 'a') { e.preventDefault(); setAppend(!pref.append); }
-    };
-    document.addEventListener('keydown', key, true);
-    function close() {
-      document.removeEventListener('keydown', key, true);
-      root2.remove(); store(); renderSections(); renderPreview();
-      if (onClosed) onClosed();
-      const n = (it.ann && it.ann[i] || []).length;
-      status(n ? 'Saved ' + n + ' box' + (n === 1 ? '' : 'es') + ' on ' + it.f + ' page ' + (i + 1) + '.' : 'No boxes on ' + it.f + ' page ' + (i + 1) + '.');
-    }
-    setAppend(pref.append); setKind(pref.k); redraw();
-    try {
-      const doc = await getDoc(it.f);
-      page = await doc.getPage(i + 1);
-      const v = page.getViewport({ scale: 1 }); dw = v.width; dh = v.height;
-    } catch (e) { status('This page could not be opened for editing.'); }
-    layoutSheet(); drawBg();
-    return { set onClose(fn) { onClosed = fn; } };
   }
+  function refresh(it, i) { if (it) pagesOf(it, i).forEach(t => decorate(t)); ub.disabled = !hist.length; rb.disabled = !fut.length; db.disabled = !(sel && opsOf(sel.it, sel.i)[sel.k]); }
+  function select(n) { const o = sel; sel = n; if (o) refresh(o.it, o.i); if (n) { refresh(n.it, n.i); const b = opsOf(n.it, n.i)[n.k]; if (b) setKind(b.k, true); } else refresh(); }
+  const snap = (it, i) => { hist.push({ it, i, v: JSON.stringify(opsOf(it, i)) }); if (hist.length > 200) hist.shift(); fut = []; };
+  const put = (it, i, ops) => { it.ann = it.ann || {}; if (ops.length) it.ann[i] = ops; else delete it.ann[i]; };
+  const commit = () => { save(); renderSections(); renderToc(); if (BP.redecorate) BP.redecorate(); };
+  function setAppend(v) {
+    pref.append = v; savePref();
+    apBtn.classList.toggle('on', v); apBtn.setAttribute('aria-pressed', v);
+    prev.classList.toggle('appending', v); apTools.hidden = !v;
+    if (!v) select(null);
+  }
+  function setKind(k, quiet) {
+    pref.k = k; savePref();
+    kBtns.forEach(b => { const on = b.dataset.k === k; b.classList.toggle('on', on); b.setAttribute('aria-pressed', on); });
+    const o = !quiet && sel && opsOf(sel.it, sel.i)[sel.k];
+    if (o && o.k !== k) { snap(sel.it, sel.i); o.k = k; commit(); refresh(sel.it, sel.i); }
+  }
+  prev.addEventListener('pointerdown', e => {
+    const t = e.target.closest('.sb-page');
+    if (!pref.append || e.button || !t || !+t.dataset.dw) return;
+    e.preventDefault();
+    const it = t._it, i = +t.dataset.i, dw = +t.dataset.dw, dh = +t.dataset.dh;
+    const pt = ev => { const r = t.getBoundingClientRect(), z = r.width / dw; return [Math.max(0, Math.min(dw, (ev.clientX - r.left) / z)), Math.max(0, Math.min(dh, (ev.clientY - r.top) / z))]; };
+    const [x, y] = pt(e), ops = opsOf(it, i), rs = e.target.closest('.ed-rs');
+    let k = -1;
+    if (rs && sel && sel.it === it && sel.i === i) k = sel.k;
+    else for (let j = ops.length - 1; j >= 0; j--) { const o = ops[j]; if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) { k = j; break; } }
+    const pid = e.pointerId; t.setPointerCapture && t.setPointerCapture(pid);
+    const run = (move, up) => {
+      const mv = ev => { if (ev.pointerId === pid) move(pt(ev)); };
+      const end = ev => { if (ev.pointerId !== pid) return; t.removeEventListener('pointermove', mv); t.removeEventListener('pointerup', end); t.removeEventListener('pointercancel', end); up(); };
+      t.addEventListener('pointermove', mv); t.addEventListener('pointerup', end); t.addEventListener('pointercancel', end);
+    };
+    if (k < 0) {
+      select(null);
+      const o = { t: 'box', k: pref.k, x, y, w: 0, h: 0 };
+      run(([a, b]) => { o.x = Math.min(x, a); o.y = Math.min(y, b); o.w = Math.abs(a - x); o.h = Math.abs(b - y); decorate(t, o); }, () => {
+        if (o.w < 3 || o.h < 3) { decorate(t); return; }
+        snap(it, i); put(it, i, ops.concat(o)); commit(); refresh(it, i);
+      });
+      return;
+    }
+    select({ it, i, k });
+    const o = ops[k], start = JSON.stringify(ops), o0 = Object.assign({}, o);
+    let moved = false;
+    run(([a, b]) => {
+      const dx = a - x, dy = b - y; moved = true;
+      if (rs) { o.w = Math.max(4, Math.min(dw - o.x, o0.w + dx)); o.h = Math.max(4, Math.min(dh - o.y, o0.h + dy)); }
+      else { o.x = Math.max(0, Math.min(o0.x + dx, dw - o.w)); o.y = Math.max(0, Math.min(o0.y + dy, dh - o.h)); }
+      pagesOf(it, i).forEach(p => decorate(p));
+    }, () => { if (moved) { hist.push({ it, i, v: start }); fut = []; commit(); refresh(it, i); } });
+  });
+  function del() { const o = sel && opsOf(sel.it, sel.i)[sel.k]; if (!o) return; const { it, i } = sel; snap(it, i); put(it, i, opsOf(it, i).filter(b => b !== o)); sel = null; commit(); refresh(it, i); }
+  function step(from, to) {
+    const h = from.pop(); if (!h) return;
+    to.push({ it: h.it, i: h.i, v: JSON.stringify(opsOf(h.it, h.i)) });
+    put(h.it, h.i, JSON.parse(h.v)); sel = null; commit(); refresh(h.it, h.i);
+  }
+  const undo = () => step(hist, fut), redo = () => step(fut, hist);
+  document.addEventListener('keydown', e => {
+    if (!prevCol.offsetParent || document.querySelector('[role=dialog]')) return;
+    if (e.target.closest && e.target.closest('input,textarea,select,[contenteditable]')) return;
+    const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+    if (!c && !e.altKey && k === 'a') { e.preventDefault(); setAppend(!pref.append); return; }
+    if (!pref.append) return;
+    if (c && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
+    else if (c && k === 'y') { e.preventDefault(); redo(); }
+    else if ((e.key === 'Delete' || e.key === 'Backspace') && sel) { e.preventDefault(); del(); }
+    else if (e.key === 'Escape' && sel) select(null);
+  });
+  setAppend(pref.append); setKind(pref.k, true); refresh();
 
   function pageMap(cp) {
     const r = ((cp.getRotation().angle % 360) + 360) % 360;
