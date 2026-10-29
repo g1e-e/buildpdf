@@ -367,6 +367,8 @@
       } else me.sel.has(i) ? me.sel.delete(i) : me.sel.add(i);
       me.last = i; paint();
     }
+    const deco = t => { if (opts.decorate && t._v) opts.decorate(+t.dataset.i, t.querySelector('.pk-img'), ...t._v); };
+    BP.redecorate = () => { if (picker === me) me.thumbs.forEach(deco); };
     async function onSeen(entries) {
       for (const en of entries) {
         if (!en.isIntersecting) continue;
@@ -386,6 +388,7 @@
           if (w !== tw()) { page.cleanup(); continue; }
           cv.dataset.w = w;
           const img = t.querySelector('.pk-img'); img.textContent = ''; img.append(cv);
+          t._v = [w, v1.width, v1.height]; deco(t);
           page.cleanup();
         } catch (e) { t.querySelector('.pk-img').textContent = 'Preview unavailable'; }
       }
